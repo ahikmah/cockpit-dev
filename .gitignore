@@ -1,0 +1,41 @@
+# Xcode
+*.xcodeproj/
+*.xcworkspace/
+xcuserdata/
+*.xcuserstate
+DerivedData/
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+
+# macOS
+.DS_Store
+*.dSYM
+*.app
+
+# Build artifacts
+CockpitDev.app/
+build/
+
+# Sensitive files
+.env
+.env.*
+*.pem
+*.p12
+*.key
+Secrets/
+credentials.json
+
+# Kiro
+.kiro/
+
+# IDE
+.vscode/
+*.code-workspace
+
+# Misc
+*.log
+*.tmp
+Thumbs.db
