@@ -9,6 +9,7 @@ class Workspace {
     var updatedAt: Date
     var gitlabInstanceURL: String
     var specDirectoryPath: String
+    var localRootPath: String?
     var kanbanColumns: [String]
     var maxStoryPointsThreshold: Int
     var notificationSettings: [String: Bool]
@@ -28,6 +29,7 @@ class Workspace {
         updatedAt: Date = Date(),
         gitlabInstanceURL: String = AppConstants.defaultGitLabInstanceURL,
         specDirectoryPath: String = ".kiro/specs",
+        localRootPath: String? = nil,
         kanbanColumns: [String] = AppConstants.defaultKanbanColumns,
         maxStoryPointsThreshold: Int = AppConstants.maxStoryPointsThreshold,
         notificationSettings: [String: Bool] = [:]
@@ -38,6 +40,7 @@ class Workspace {
         self.updatedAt = updatedAt
         self.gitlabInstanceURL = gitlabInstanceURL
         self.specDirectoryPath = specDirectoryPath
+        self.localRootPath = localRootPath
         self.kanbanColumns = kanbanColumns
         self.maxStoryPointsThreshold = maxStoryPointsThreshold
         self.notificationSettings = notificationSettings

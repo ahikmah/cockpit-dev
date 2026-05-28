@@ -3,7 +3,7 @@ import SwiftData
 @testable import CockpitDev
 
 @MainActor
-final class MemberManagementViewModelTests: XCTestCase {
+final class MemberManagementViewModelTests: CockpitDevTestCase {
 
     private var viewModel: MemberManagementViewModel!
     private var modelContainer: ModelContainer!

@@ -4,7 +4,8 @@ import SwiftData
 
 /// End-to-end integration tests verifying complete workflows across multiple services.
 /// Uses mocked GitLab services (no real GitLab connection needed).
-final class IntegrationTests: XCTestCase {
+@MainActor
+final class IntegrationTests: CockpitDevTestCase {
 
     private var modelContainer: ModelContainer!
     private var modelContext: ModelContext!
@@ -333,7 +334,8 @@ final class IntegrationTests: XCTestCase {
 
         try modelContext.save()
 
-        // Simulate a remote update (remote changed after sync)
+        // Simulate a remote content update. Planning fields are owned by the database,
+        // so a GitLab weight must not replace local planning metadata.
         let remoteIssue = GitLabIssue(
             id: 3001,
             iid: 30,
@@ -349,6 +351,7 @@ final class IntegrationTests: XCTestCase {
             createdAt: Date().addingTimeInterval(-86400),
             updatedAt: Date(),
             closedAt: nil,
+            startDate: nil,
             dueDate: nil,
             webUrl: "https://gitlab.example.com/project/issues/30"
         )
@@ -360,7 +363,7 @@ final class IntegrationTests: XCTestCase {
         if case .noConflict(let merged) = result {
             XCTAssertEqual(merged.title, "Synced Ticket - Updated")
             XCTAssertEqual(merged.status, .inReview)
-            XCTAssertEqual(merged.storyPoints, 8)
+            XCTAssertEqual(merged.storyPoints, 5)
         } else {
             XCTFail("Expected noConflict result, got \(result)")
         }

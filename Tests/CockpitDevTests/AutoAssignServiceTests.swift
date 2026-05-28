@@ -2,7 +2,7 @@ import XCTest
 @testable import CockpitDev
 
 /// Unit tests for AutoAssignService covering scoring, threshold enforcement, and edge cases.
-final class AutoAssignServiceTests: XCTestCase {
+final class AutoAssignServiceTests: CockpitDevTestCase {
 
     private var service: AutoAssignService!
 

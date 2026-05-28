@@ -23,6 +23,7 @@ struct WorkspaceListView: View {
             idealWidth: DesignSystem.Sidebar.width,
             maxWidth: DesignSystem.Sidebar.maxWidth
         )
+        .background(DesignSystem.Colors.sidebar)
         .sheet(isPresented: $viewModel.showCreateSheet) {
             CreateWorkspaceSheet(viewModel: viewModel)
         }
@@ -73,9 +74,10 @@ struct WorkspaceListView: View {
             .buttonStyle(.plain)
             .help("Create Workspace")
         }
-        .padding(.horizontal, DesignSystem.Spacing.spacing12)
-        .padding(.top, DesignSystem.Spacing.spacing16)
-        .padding(.bottom, DesignSystem.Spacing.spacing8)
+        .padding(.horizontal, DesignSystem.Spacing.spacing20)
+        .padding(.top, DesignSystem.Spacing.spacing20)
+        .padding(.bottom, DesignSystem.Spacing.spacing12)
+        .background(DesignSystem.Colors.sidebar)
     }
 
     private var emptyState: some View {
@@ -106,30 +108,33 @@ struct WorkspaceListView: View {
     }
 
     private var workspaceList: some View {
-        List(selection: Binding(
-            get: { viewModel.selectedWorkspace?.id },
-            set: { newId in
-                viewModel.selectedWorkspace = viewModel.workspaces.first { $0.id == newId }
-            }
-        )) {
-            ForEach(viewModel.workspaces, id: \.id) { workspace in
-                WorkspaceRowView(
-                    workspace: workspace,
-                    isSelected: viewModel.selectedWorkspace?.id == workspace.id
-                )
-                .tag(workspace.id)
-                .contextMenu {
-                    Button("Delete Workspace", role: .destructive) {
-                        viewModel.confirmDeletion(of: workspace)
+        ScrollView {
+            LazyVStack(spacing: DesignSystem.Spacing.spacing4) {
+                ForEach(viewModel.workspaces, id: \.id) { workspace in
+                    Button {
+                        viewModel.selectedWorkspace = workspace
+                    } label: {
+                        WorkspaceRowView(
+                            workspace: workspace,
+                            isSelected: viewModel.selectedWorkspace?.id == workspace.id
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .contextMenu {
+                        Button("Delete Workspace", role: .destructive) {
+                            viewModel.confirmDeletion(of: workspace)
+                        }
                     }
                 }
             }
+            .padding(.horizontal, DesignSystem.Spacing.spacing12)
+            .padding(.top, DesignSystem.Spacing.spacing4)
         }
-        .listStyle(.sidebar)
+        .background(DesignSystem.Colors.sidebar)
     }
 }
 
 #Preview {
     WorkspaceListView(viewModel: WorkspaceListViewModel())
-        .frame(width: 240, height: 400)
+        .frame(width: 236, height: 400)
 }

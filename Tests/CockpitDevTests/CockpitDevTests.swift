@@ -1,7 +1,7 @@
 import XCTest
 @testable import CockpitDev
 
-final class CockpitDevTests: XCTestCase {
+final class CockpitDevTests: CockpitDevTestCase {
 
     // MARK: - Enum Tests
 

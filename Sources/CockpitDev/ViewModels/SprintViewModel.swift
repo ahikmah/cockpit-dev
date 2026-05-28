@@ -92,7 +92,49 @@ class SprintViewModel {
             unassignedTickets = []
             return
         }
-        unassignedTickets = workspace.tickets.filter { $0.sprint == nil }
+        unassignedTickets = workspace.tickets
+            .filter { $0.sprint == nil }
+            .sorted(by: ticketPlanningOrder)
+    }
+
+    /// Returns sprint tickets in a stable planning order for review.
+    func orderedTickets(for sprint: Sprint) -> [Ticket] {
+        sprint.tickets.sorted(by: ticketPlanningOrder)
+    }
+
+    private func ticketPlanningOrder(_ lhs: Ticket, _ rhs: Ticket) -> Bool {
+        switch (lhs.startDate, rhs.startDate) {
+        case let (lhsStart?, rhsStart?) where lhsStart != rhsStart:
+            return lhsStart < rhsStart
+        case (nil, _?):
+            return false
+        case (_?, nil):
+            return true
+        default:
+            break
+        }
+
+        switch (lhs.endDate, rhs.endDate) {
+        case let (lhsEnd?, rhsEnd?) where lhsEnd != rhsEnd:
+            return lhsEnd < rhsEnd
+        case (nil, _?):
+            return false
+        case (_?, nil):
+            return true
+        default:
+            break
+        }
+
+        switch (lhs.gitlabIssueIid, rhs.gitlabIssueIid) {
+        case let (lhsIid?, rhsIid?) where lhsIid != rhsIid:
+            return lhsIid < rhsIid
+        case (nil, _?):
+            return false
+        case (_?, nil):
+            return true
+        default:
+            return lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
+        }
     }
 
     // MARK: - Sprint CRUD
@@ -171,6 +213,46 @@ class SprintViewModel {
         refreshSprints()
     }
 
+    /// Deletes a sprint locally and removes the linked GitLab milestone when possible.
+    func deleteSprint(_ sprint: Sprint) async {
+        guard let workspace else { return }
+
+        isLoading = true
+        defer { isLoading = false }
+
+        if let gitLabClient,
+           let firstRepo = workspace.repositories.first,
+           let milestoneId = sprint.gitlabMilestoneId {
+            do {
+                try await gitLabClient.deleteMilestone(projectId: firstRepo.gitlabProjectId, milestoneId: milestoneId)
+            } catch {
+                errorMessage = "Failed to delete GitLab milestone: \(error.localizedDescription)"
+                showError = true
+            }
+        }
+
+        for ticket in sprint.tickets {
+            ticket.sprint = nil
+            ticket.updatedAt = Date()
+            syncTicketMilestone(ticket, milestoneId: nil)
+        }
+        sprint.tickets.removeAll()
+        workspace.sprints.removeAll { $0.id == sprint.id }
+        if selectedSprint?.id == sprint.id {
+            selectedSprint = nil
+        }
+        modelContext?.delete(sprint)
+
+        do {
+            try modelContext?.save()
+        } catch {
+            errorMessage = "Failed to delete sprint locally: \(error.localizedDescription)"
+            showError = true
+        }
+
+        refreshSprints()
+    }
+
     // MARK: - Ticket Assignment
 
     /// Assigns a ticket to the selected sprint.
@@ -180,6 +262,7 @@ class SprintViewModel {
         if !sprint.tickets.contains(where: { $0.id == ticket.id }) {
             sprint.tickets.append(ticket)
         }
+        syncTicketMilestone(ticket, milestoneId: sprint.gitlabMilestoneId)
         refreshSprints()
     }
 
@@ -190,7 +273,35 @@ class SprintViewModel {
         }
         ticket.sprint = nil
         ticket.updatedAt = Date()
+        syncTicketMilestone(ticket, milestoneId: nil)
         refreshSprints()
+    }
+
+    private func syncTicketMilestone(_ ticket: Ticket, milestoneId: Int?) {
+        guard let gitLabClient,
+              let workspace,
+              let firstRepo = workspace.repositories.first,
+              let issueIid = ticket.gitlabIssueIid else {
+            return
+        }
+
+        Task {
+            do {
+                var fields = IssueUpdateFields()
+                fields.milestoneId = milestoneId
+                fields.clearMilestone = milestoneId == nil
+                _ = try await gitLabClient.updateIssue(
+                    projectId: firstRepo.gitlabProjectId,
+                    issueIid: issueIid,
+                    fields: fields
+                )
+            } catch {
+                await MainActor.run {
+                    self.errorMessage = "Failed to sync ticket milestone: \(error.localizedDescription)"
+                    self.showError = true
+                }
+            }
+        }
     }
 
     // MARK: - Progress Calculation

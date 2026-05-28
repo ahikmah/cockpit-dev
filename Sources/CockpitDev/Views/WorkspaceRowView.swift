@@ -14,15 +14,19 @@ struct WorkspaceRowView: View {
     }
 
     var body: some View {
-        HStack(spacing: DesignSystem.Spacing.spacing8) {
+        HStack(spacing: DesignSystem.Spacing.spacing12) {
             // Workspace icon
             RoundedRectangle(cornerRadius: DesignSystem.Radius.small)
-                .fill(isSelected ? DesignSystem.Colors.accent : DesignSystem.Colors.accent.opacity(0.15))
-                .frame(width: 28, height: 28)
+                .fill(isSelected ? DesignSystem.Colors.accentSoft : DesignSystem.Colors.sidebarIcon)
+                .frame(width: 32, height: 32)
                 .overlay {
                     Text(workspace.name.prefix(1).uppercased())
                         .font(.system(size: 12, weight: .semibold, design: .rounded))
-                        .foregroundStyle(isSelected ? .white : DesignSystem.Colors.accent)
+                        .foregroundStyle(isSelected ? DesignSystem.Colors.accent : DesignSystem.Colors.textSecondary)
+                }
+                .overlay {
+                    RoundedRectangle(cornerRadius: DesignSystem.Radius.small)
+                        .stroke(DesignSystem.Colors.border.opacity(isSelected ? 0.15 : 0.8), lineWidth: 1)
                 }
 
             // Name and metadata
@@ -32,12 +36,10 @@ struct WorkspaceRowView: View {
                     .foregroundStyle(DesignSystem.Colors.textPrimary)
                     .lineLimit(1)
 
-                HStack(spacing: DesignSystem.Spacing.spacing8) {
-                    Label("\(workspace.repositories.count)", systemImage: "folder.fill")
-                    Label("\(workspace.members.count)", systemImage: "person.2.fill")
-                }
+                Text("\(workspace.repositories.count) repos · \(workspace.members.count) members")
                 .font(DesignSystem.Typography.caption)
-                .foregroundStyle(DesignSystem.Colors.textTertiary)
+                .foregroundStyle(DesignSystem.Colors.textSecondary)
+                .lineLimit(1)
             }
 
             Spacer()
@@ -47,12 +49,16 @@ struct WorkspaceRowView: View {
                 notificationBadge
             }
         }
-        .padding(.horizontal, DesignSystem.Spacing.spacing8)
-        .padding(.vertical, DesignSystem.Spacing.spacing6)
+        .padding(.horizontal, DesignSystem.Spacing.spacing12)
+        .padding(.vertical, DesignSystem.Spacing.spacing10)
         .background(
-            RoundedRectangle(cornerRadius: DesignSystem.Radius.small)
-                .fill(isSelected ? DesignSystem.Colors.accentSoft : Color.clear)
+            RoundedRectangle(cornerRadius: DesignSystem.Radius.medium)
+                .fill(isSelected ? DesignSystem.Colors.sidebarSelected : Color.clear)
         )
+        .overlay {
+            RoundedRectangle(cornerRadius: DesignSystem.Radius.medium)
+                .stroke(isSelected ? DesignSystem.Colors.border.opacity(0.75) : Color.clear, lineWidth: 1)
+        }
         .contentShape(Rectangle())
     }
 
@@ -66,7 +72,7 @@ struct WorkspaceRowView: View {
             .padding(.vertical, 2)
             .background(
                 Capsule()
-                    .fill(DesignSystem.Colors.accent)
+                    .fill(DesignSystem.Colors.danger)
             )
             .accessibilityLabel("\(unreadNotificationCount) unread notifications")
     }
@@ -84,5 +90,5 @@ struct WorkspaceRowView: View {
         )
     }
     .padding()
-    .frame(width: 240)
+    .frame(width: 236)
 }

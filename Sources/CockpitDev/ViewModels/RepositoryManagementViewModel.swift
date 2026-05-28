@@ -41,6 +41,8 @@ enum RepositoryValidationError: Error, LocalizedError {
 @MainActor
 class RepositoryManagementViewModel {
 
+    typealias RepositoryCloneHandler = (Repository, URL, GitCredentials) async -> Result<URL, Error>
+
     // MARK: - State
 
     /// The workspace being managed.
@@ -77,11 +79,19 @@ class RepositoryManagementViewModel {
 
     private var modelContext: ModelContext?
     private var gitLabAPIClient: GitLabAPIClient?
-    private let ideContextService = IDEContextService()
+    private var cloneTokenProvider: (() async throws -> String)?
+    private let ideContextService: IDEContextService
+    private let repositoryCloneHandler: RepositoryCloneHandler?
 
     // MARK: - Initialization
 
-    init() {}
+    init(
+        ideContextService: IDEContextService? = nil,
+        repositoryCloneHandler: RepositoryCloneHandler? = nil
+    ) {
+        self.ideContextService = ideContextService ?? IDEContextService()
+        self.repositoryCloneHandler = repositoryCloneHandler
+    }
 
     /// Configures the view model with dependencies.
     /// - Parameters:
@@ -91,11 +101,13 @@ class RepositoryManagementViewModel {
     func configure(
         workspace: Workspace,
         modelContext: ModelContext,
-        gitLabAPIClient: GitLabAPIClient? = nil
+        gitLabAPIClient: GitLabAPIClient? = nil,
+        cloneTokenProvider: (() async throws -> String)? = nil
     ) {
         self.workspace = workspace
         self.modelContext = modelContext
         self.gitLabAPIClient = gitLabAPIClient
+        self.cloneTokenProvider = cloneTokenProvider
     }
 
     // MARK: - Repository List
@@ -141,7 +153,7 @@ class RepositoryManagementViewModel {
 
         do {
             let project = try await gitLabAPIClient.validateProjectAccess(url: trimmedURL)
-            return createRepository(from: project, url: trimmedURL)
+            return await cloneAndCreateRepository(from: project)
         } catch let error as GitLabAPIError {
             let validationError = mapGitLabError(error, url: trimmedURL)
             showErrorMessage(validationError.localizedDescription)
@@ -223,6 +235,30 @@ class RepositoryManagementViewModel {
         guard let workspace else { return }
 
         do {
+            let missingRepositories = ideContextService.getMissingRepositories(workspace: workspace)
+            if !missingRepositories.isEmpty {
+                guard let cloneTokenProvider else {
+                    showErrorMessage("A GitLab session is required to clone repositories before opening in Zed.")
+                    return
+                }
+
+                let token = try await cloneTokenProvider()
+                let rootDirectory = ideContextService.localRootDirectory(for: workspace)
+                for (repository, _) in missingRepositories {
+                    let result = await cloneRepository(
+                        repository,
+                        into: rootDirectory,
+                        credentials: GitCredentials(oauthToken: token)
+                    )
+                    if case .failure(let error) = result {
+                        showErrorMessage("Failed to clone \(repository.name): \(error.localizedDescription)")
+                        return
+                    }
+                }
+
+                try modelContext?.save()
+            }
+
             try await ideContextService.openInIDE(workspace: workspace)
         } catch {
             showErrorMessage(error.localizedDescription)
@@ -249,7 +285,7 @@ class RepositoryManagementViewModel {
     // MARK: - Private Helpers
 
     /// Creates a Repository model from a validated GitLab project.
-    private func createRepository(from project: GitLabProject, url: String) -> Bool {
+    private func cloneAndCreateRepository(from project: GitLabProject) async -> Bool {
         guard let workspace, let modelContext else {
             showErrorMessage("Unable to save repository.")
             return false
@@ -258,9 +294,35 @@ class RepositoryManagementViewModel {
         let repository = Repository(
             gitlabProjectId: project.id,
             name: project.name,
-            url: url,
+            url: project.httpUrlToRepo,
             defaultBranch: project.defaultBranch ?? "main"
         )
+
+        guard let cloneTokenProvider else {
+            showErrorMessage("A GitLab session is required to clone this repository locally.")
+            return false
+        }
+
+        do {
+            let token = try await cloneTokenProvider()
+            let rootDirectory = ideContextService.localRootDirectory(for: workspace)
+            let result = await cloneRepository(
+                repository,
+                into: rootDirectory,
+                credentials: GitCredentials(oauthToken: token)
+            )
+
+            switch result {
+            case .success(let checkoutURL):
+                repository.localPath = checkoutURL.path
+            case .failure(let error):
+                showErrorMessage("Failed to clone repository locally: \(error.localizedDescription)")
+                return false
+            }
+        } catch {
+            showErrorMessage("Failed to access GitLab credentials for cloning: \(error.localizedDescription)")
+            return false
+        }
 
         repository.workspace = workspace
         workspace.repositories.append(repository)
@@ -275,6 +337,29 @@ class RepositoryManagementViewModel {
             showErrorMessage("Failed to save repository: \(error.localizedDescription)")
             return false
         }
+    }
+
+    private func cloneRepository(
+        _ repository: Repository,
+        into rootDirectory: URL,
+        credentials: GitCredentials
+    ) async -> Result<URL, Error> {
+        if let repositoryCloneHandler {
+            return await repositoryCloneHandler(repository, rootDirectory, credentials)
+        }
+
+        let results = await ideContextService.cloneMissingRepos(
+            repos: [repository],
+            baseDirectory: rootDirectory,
+            credentials: credentials,
+            progressHandler: nil
+        )
+
+        guard let result = results.first else {
+            return .failure(IDEContextError.repositoryNotCloned(repository.name))
+        }
+
+        return result.result
     }
 
     /// Validates that a URL looks like a valid GitLab repository URL.

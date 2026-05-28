@@ -7,7 +7,7 @@ import NIOHTTP1
 // MARK: - Mock HTTP Server
 
 /// A lightweight mock HTTP server for testing GitLab API client interactions.
-final class MockHTTPServer {
+final class MockHTTPServer: @unchecked Sendable {
     private let group: EventLoopGroup
     private var channel: Channel?
     let port: Int
@@ -97,7 +97,7 @@ final class MockHTTPHandler: ChannelInboundHandler {
 
 // MARK: - GitLabAPIClient Tests
 
-final class GitLabAPIClientTests: XCTestCase {
+final class GitLabAPIClientTests: CockpitDevTestCase {
     var server: MockHTTPServer!
     var client: GitLabAPIClient!
     var serverPort: Int!
@@ -157,12 +157,17 @@ final class GitLabAPIClientTests: XCTestCase {
     // MARK: - Issue Tests
 
     func testCreateIssue() async throws {
+        var capturedBody: [String: Any]?
+
         server.handler = { head, body in
             XCTAssertTrue(head.uri.contains("/api/v4/projects/1/issues"))
             XCTAssertEqual(head.method, .POST)
+            if let body {
+                capturedBody = try? JSONSerialization.jsonObject(with: body) as? [String: Any]
+            }
 
             let issue = """
-            {"id":100,"iid":1,"project_id":1,"title":"Test Issue","description":"A test","state":"opened","labels":["bug"],"weight":3,"assignee":null,"assignees":[],"milestone":null,"created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-01T00:00:00Z","closed_at":null,"due_date":null,"web_url":"https://gitlab.com/test/project/-/issues/1"}
+            {"id":100,"iid":1,"project_id":1,"title":"Test Issue","description":"A test","state":"opened","labels":["bug"],"weight":3,"assignee":null,"assignees":[],"milestone":null,"created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-01T00:00:00Z","closed_at":null,"start_date":"2024-01-02","due_date":"2024-01-10","web_url":"https://gitlab.com/test/project/-/issues/1"}
             """
             return (201, [], issue.data(using: .utf8)!)
         }
@@ -172,34 +177,82 @@ final class GitLabAPIClientTests: XCTestCase {
             title: "Test Issue",
             description: "A test",
             labels: ["bug"],
-            weight: 3
+            weight: 3,
+            assigneeId: 7,
+            startDate: "2024-01-02",
+            dueDate: "2024-01-10",
+            milestoneId: 12
         )
 
+        XCTAssertEqual(capturedBody?["assignee_ids"] as? [Int], [7])
+        XCTAssertEqual(capturedBody?["start_date"] as? String, "2024-01-02")
+        XCTAssertEqual(capturedBody?["due_date"] as? String, "2024-01-10")
+        XCTAssertEqual(capturedBody?["milestone_id"] as? Int, 12)
         XCTAssertEqual(issue.id, 100)
         XCTAssertEqual(issue.iid, 1)
         XCTAssertEqual(issue.title, "Test Issue")
         XCTAssertEqual(issue.state, "opened")
         XCTAssertEqual(issue.labels, ["bug"])
         XCTAssertEqual(issue.weight, 3)
+        XCTAssertEqual(issue.startDate, "2024-01-02")
+        XCTAssertEqual(issue.dueDate, "2024-01-10")
     }
 
     func testUpdateIssue() async throws {
-        server.handler = { head, _ in
+        var capturedBody: [String: Any]?
+
+        server.handler = { head, body in
             XCTAssertTrue(head.uri.contains("/api/v4/projects/1/issues/5"))
             XCTAssertEqual(head.method, .PUT)
+            if let body {
+                capturedBody = try? JSONSerialization.jsonObject(with: body) as? [String: Any]
+            }
 
             let issue = """
-            {"id":100,"iid":5,"project_id":1,"title":"Updated Title","description":null,"state":"opened","labels":["feature"],"weight":5,"assignee":null,"assignees":[],"milestone":null,"created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-02T00:00:00Z","closed_at":null,"due_date":null,"web_url":"https://gitlab.com/test/project/-/issues/5"}
+            {"id":100,"iid":5,"project_id":1,"title":"Updated Title","description":null,"state":"opened","labels":["feature"],"weight":5,"assignee":null,"assignees":[],"milestone":null,"created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-02T00:00:00Z","closed_at":null,"start_date":"2024-01-03","due_date":"2024-01-11","web_url":"https://gitlab.com/test/project/-/issues/5"}
             """
             return (200, [], issue.data(using: .utf8)!)
         }
 
-        let fields = IssueUpdateFields(title: "Updated Title", labels: ["feature"], weight: 5)
+        let fields = IssueUpdateFields(
+            title: "Updated Title",
+            labels: ["feature"],
+            weight: 5,
+            assigneeIds: [9],
+            startDate: "2024-01-03",
+            dueDate: "2024-01-11",
+            milestoneId: 22
+        )
         let issue = try await client.updateIssue(projectId: 1, issueIid: 5, fields: fields)
 
+        XCTAssertEqual(capturedBody?["assignee_ids"] as? [Int], [9])
+        XCTAssertEqual(capturedBody?["start_date"] as? String, "2024-01-03")
+        XCTAssertEqual(capturedBody?["due_date"] as? String, "2024-01-11")
+        XCTAssertEqual(capturedBody?["milestone_id"] as? Int, 22)
         XCTAssertEqual(issue.title, "Updated Title")
         XCTAssertEqual(issue.labels, ["feature"])
         XCTAssertEqual(issue.weight, 5)
+        XCTAssertEqual(issue.startDate, "2024-01-03")
+    }
+
+    func testUpdateIssueCanClearMilestone() async throws {
+        var capturedBody: [String: Any]?
+
+        server.handler = { _, body in
+            if let body {
+                capturedBody = try? JSONSerialization.jsonObject(with: body) as? [String: Any]
+            }
+            let issue = """
+            {"id":100,"iid":5,"project_id":1,"title":"Updated Title","description":null,"state":"opened","labels":[],"weight":null,"assignee":null,"assignees":[],"milestone":null,"created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-02T00:00:00Z","closed_at":null,"due_date":null,"web_url":"https://gitlab.com/test/project/-/issues/5"}
+            """
+            return (200, [], issue.data(using: .utf8)!)
+        }
+
+        var fields = IssueUpdateFields()
+        fields.clearMilestone = true
+        _ = try await client.updateIssue(projectId: 1, issueIid: 5, fields: fields)
+
+        XCTAssertTrue(capturedBody?["milestone_id"] is NSNull)
     }
 
     func testCloseIssue() async throws {
@@ -226,6 +279,7 @@ final class GitLabAPIClientTests: XCTestCase {
         server.handler = { head, _ in
             XCTAssertTrue(head.uri.contains("/api/v4/projects/1/issues"))
             XCTAssertEqual(head.method, .GET)
+            XCTAssertTrue(head.uri.contains("state=all"), "Issue sync must include closed/completed GitLab issues.")
 
             let issues = """
             [{"id":1,"iid":1,"project_id":1,"title":"Issue 1","description":null,"state":"opened","labels":[],"weight":null,"assignee":null,"assignees":[],"milestone":null,"created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-01T00:00:00Z","closed_at":null,"due_date":null,"web_url":"https://gitlab.com/test/project/-/issues/1"},{"id":2,"iid":2,"project_id":1,"title":"Issue 2","description":null,"state":"opened","labels":[],"weight":null,"assignee":null,"assignees":[],"milestone":null,"created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-01T00:00:00Z","closed_at":null,"due_date":null,"web_url":"https://gitlab.com/test/project/-/issues/2"}]
@@ -238,6 +292,21 @@ final class GitLabAPIClientTests: XCTestCase {
         XCTAssertEqual(issues.count, 2)
         XCTAssertEqual(issues[0].title, "Issue 1")
         XCTAssertEqual(issues[1].title, "Issue 2")
+    }
+
+    func testFetchIssuesDecodesStartDate() async throws {
+        server.handler = { head, _ in
+            XCTAssertTrue(head.uri.contains("/api/v4/projects/1/issues"))
+            let issues = """
+            [{"id":1,"iid":1,"project_id":1,"title":"Scheduled","description":null,"state":"opened","labels":[],"weight":8,"assignee":null,"assignees":[],"milestone":null,"created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-01T00:00:00Z","closed_at":null,"start_date":"2024-02-03","due_date":"2024-02-09","web_url":"https://gitlab.com/test/project/-/issues/1"}]
+            """
+            return (200, [("X-Total-Pages", "1"), ("X-Next-Page", "")], issues.data(using: .utf8)!)
+        }
+
+        let issues = try await client.fetchIssues(projectId: 1)
+
+        XCTAssertEqual(issues.first?.startDate, "2024-02-03")
+        XCTAssertEqual(issues.first?.dueDate, "2024-02-09")
     }
 
 
@@ -277,6 +346,58 @@ final class GitLabAPIClientTests: XCTestCase {
         XCTAssertEqual(diffs.count, 1)
         XCTAssertEqual(diffs[0].oldPath, "file.swift")
         XCTAssertFalse(diffs[0].newFile)
+    }
+
+    func testFetchMRCommits() async throws {
+        server.handler = { head, _ in
+            XCTAssertTrue(head.uri.contains("/api/v4/projects/1/merge_requests/7/commits"))
+            XCTAssertEqual(head.method, .GET)
+
+            let commits = """
+            [{"id":"abc123","short_id":"abc123","title":"CYINT84-015 finish work","message":"CYINT84-015 finish work","author_name":"Dev","author_email":"dev@example.com","committer_name":"Dev","committer_email":"dev@example.com","created_at":"2026-04-15T10:00:00Z","committed_date":"2026-04-15T12:00:00Z"}]
+            """
+            return (200, [("X-Total-Pages", "1"), ("X-Next-Page", "")], commits.data(using: .utf8)!)
+        }
+
+        let commits = try await client.fetchMRCommits(projectId: 1, mrIid: 7)
+
+        XCTAssertEqual(commits.count, 1)
+        XCTAssertEqual(commits.first?.shortId, "abc123")
+        XCTAssertEqual(commits.first?.committedDate, ISO8601DateFormatter().date(from: "2026-04-15T12:00:00Z"))
+    }
+
+    func testFetchIssueRelatedMergeRequests() async throws {
+        server.handler = { head, _ in
+            XCTAssertTrue(head.uri.contains("/api/v4/projects/1/issues/68/related_merge_requests"))
+            XCTAssertEqual(head.method, .GET)
+
+            let mrs = """
+            [{"id":25,"iid":25,"project_id":1,"title":"Implementation cleanup","description":null,"state":"merged","source_branch":"feature/refactor","target_branch":"main","author":{"id":1,"username":"dev","name":"Developer","avatar_url":null,"email":null,"state":"active","web_url":null},"assignee":null,"pipeline":null,"created_at":"2026-04-12T00:00:00Z","updated_at":"2026-04-16T00:00:00Z","merged_at":"2026-04-16T00:00:00Z","closed_at":null,"web_url":"https://gitlab.example.com/test/project/-/merge_requests/25"}]
+            """
+            return (200, [("X-Total-Pages", "1"), ("X-Next-Page", "")], mrs.data(using: .utf8)!)
+        }
+
+        let mrs = try await client.fetchIssueRelatedMergeRequests(projectId: 1, issueIid: 68)
+
+        XCTAssertEqual(mrs.map(\.iid), [25])
+    }
+
+    func testFetchIssueNotes() async throws {
+        server.handler = { head, _ in
+            XCTAssertTrue(head.uri.contains("/api/v4/projects/1/issues/68/notes"))
+            XCTAssertEqual(head.method, .GET)
+
+            let notes = """
+            [{"id":1,"body":"mentioned in merge request !25","author":{"id":1,"username":"dev","name":"Developer","avatar_url":null,"email":null,"state":"active","web_url":null},"created_at":"2026-04-16T11:35:32Z","updated_at":"2026-04-16T11:35:32Z","system":true,"resolvable":false,"resolved":null,"resolved_by":null,"position":null}]
+            """
+            return (200, [("X-Total-Pages", "1"), ("X-Next-Page", "")], notes.data(using: .utf8)!)
+        }
+
+        let notes = try await client.fetchIssueNotes(projectId: 1, issueIid: 68)
+
+        XCTAssertEqual(notes.count, 1)
+        XCTAssertEqual(notes.first?.body, "mentioned in merge request !25")
+        XCTAssertEqual(notes.first?.createdAt, ISO8601DateFormatter().date(from: "2026-04-16T11:35:32Z"))
     }
 
     func testFetchMRDiscussions() async throws {
@@ -420,6 +541,26 @@ final class GitLabAPIClientTests: XCTestCase {
 
     // MARK: - Milestone Tests
 
+    func testFetchMilestones() async throws {
+        server.handler = { head, _ in
+            XCTAssertTrue(head.uri.contains("/api/v4/projects/1/milestones"))
+            XCTAssertEqual(head.method, .GET)
+
+            let milestones = """
+            [{"id":10,"iid":1,"project_id":1,"title":"Sprint 1","description":"First sprint","state":"active","start_date":"2024-01-01","due_date":"2024-01-14","created_at":"2024-01-01T00:00:00Z","updated_at":"2024-01-02T00:00:00Z","web_url":"https://gitlab.com/test/project/-/milestones/1"}]
+            """
+            return (200, [("X-Total-Pages", "1"), ("X-Next-Page", "")], milestones.data(using: .utf8)!)
+        }
+
+        let milestones = try await client.fetchMilestones(projectId: 1)
+
+        XCTAssertEqual(milestones.count, 1)
+        XCTAssertEqual(milestones[0].id, 10)
+        XCTAssertEqual(milestones[0].title, "Sprint 1")
+        XCTAssertEqual(milestones[0].startDate, "2024-01-01")
+        XCTAssertEqual(milestones[0].dueDate, "2024-01-14")
+    }
+
     func testCreateMilestone() async throws {
         server.handler = { head, body in
             XCTAssertTrue(head.uri.contains("/api/v4/projects/1/milestones"))
@@ -452,6 +593,16 @@ final class GitLabAPIClientTests: XCTestCase {
         XCTAssertEqual(milestone.state, "active")
     }
 
+    func testDeleteMilestone() async throws {
+        server.handler = { head, _ in
+            XCTAssertTrue(head.uri.contains("/api/v4/projects/1/milestones/10"))
+            XCTAssertEqual(head.method, .DELETE)
+            return (204, [], Data())
+        }
+
+        try await client.deleteMilestone(projectId: 1, milestoneId: 10)
+    }
+
     // MARK: - Repository File Tests
 
     func testFetchFileContent() async throws {
@@ -471,6 +622,29 @@ final class GitLabAPIClientTests: XCTestCase {
         let content = try await client.fetchFileContent(projectId: 1, filePath: "README.md", ref: "main")
 
         XCTAssertEqual(content, originalContent)
+    }
+
+    func testFetchFileContent_encodesNestedFilePathAsSingleGitLabParameter() async throws {
+        let base64Content = Data("# Tasks".utf8).base64EncodedString()
+
+        server.handler = { head, _ in
+            XCTAssertTrue(
+                head.uri.contains("/repository/files/openspec%2Fchanges%2Ftask-1%2Ftasks.md"),
+                "Nested GitLab file paths must be percent-encoded inside the path parameter: \(head.uri)"
+            )
+            let response = """
+            {"content":"\(base64Content)","encoding":"base64"}
+            """
+            return (200, [], response.data(using: .utf8)!)
+        }
+
+        let content = try await client.fetchFileContent(
+            projectId: 1,
+            filePath: "openspec/changes/task-1/tasks.md",
+            ref: "orbit-dev-84"
+        )
+
+        XCTAssertEqual(content, "# Tasks")
     }
 
     func testFetchBranches() async throws {

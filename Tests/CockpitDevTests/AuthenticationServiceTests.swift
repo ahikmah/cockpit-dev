@@ -1,7 +1,7 @@
 import XCTest
 @testable import CockpitDev
 
-final class AuthenticationServiceTests: XCTestCase {
+final class AuthenticationServiceTests: CockpitDevTestCase {
 
     private var authService: AuthenticationService!
     private var currentDate: Date!

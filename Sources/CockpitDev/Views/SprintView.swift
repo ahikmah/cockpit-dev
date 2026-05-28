@@ -5,10 +5,14 @@ import SwiftData
 /// in a split layout.
 struct SprintView: View {
     let workspace: Workspace
+    let gitLabClient: GitLabAPIClient?
+    let modelContext: ModelContext?
     @State private var viewModel: SprintViewModel
 
     init(workspace: Workspace, gitLabClient: GitLabAPIClient? = nil, modelContext: ModelContext? = nil) {
         self.workspace = workspace
+        self.gitLabClient = gitLabClient
+        self.modelContext = modelContext
         self._viewModel = State(initialValue: SprintViewModel(
             workspace: workspace,
             gitLabClient: gitLabClient,
@@ -24,7 +28,11 @@ struct SprintView: View {
 
             // Right: Sprint detail or empty state
             if let selectedSprint = viewModel.selectedSprint {
-                SprintDetailView(sprint: selectedSprint, viewModel: viewModel)
+                SprintDetailView(
+                    sprint: selectedSprint,
+                    viewModel: viewModel,
+                    syncEngine: syncEngine
+                )
                     .frame(minWidth: 500)
             } else {
                 noSelectionView
@@ -44,6 +52,17 @@ struct SprintView: View {
             viewModel.workspace = workspace
             viewModel.refreshSprints()
         }
+        .onChange(of: workspace.sprints.count) { _, _ in
+            viewModel.refreshSprints()
+        }
+        .onChange(of: workspace.tickets.count) { _, _ in
+            viewModel.refreshSprints()
+        }
+    }
+
+    private var syncEngine: SyncEngine? {
+        guard let gitLabClient, let modelContext else { return nil }
+        return SyncEngine(apiClient: gitLabClient, modelContext: modelContext)
     }
 
     // MARK: - No Selection View

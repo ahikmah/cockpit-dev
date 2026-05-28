@@ -3,7 +3,7 @@ import SwiftData
 @testable import CockpitDev
 
 @MainActor
-final class KanbanViewModelTests: XCTestCase {
+final class KanbanViewModelTests: CockpitDevTestCase {
 
     private var viewModel: KanbanViewModel!
     private var modelContext: ModelContext!

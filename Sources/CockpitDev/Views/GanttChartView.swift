@@ -5,57 +5,120 @@ import SwiftData
 /// Displays ticket timelines, dependency arrows, conflict highlighting,
 /// and supports zoom, pan, and drag-to-reschedule interactions.
 struct GanttChartView: View {
+    @Environment(\.modelContext) private var modelContext
     @Bindable var viewModel: GanttViewModel
     @State private var viewSize: CGSize = .zero
     @State private var magnifyGestureActive: Bool = false
+    @State private var hoveredTicket: Ticket?
+    @State private var hoverLocation: CGPoint = .zero
+    @State private var selectedDetailTicket: Ticket?
+    @State private var ticketDetailViewModel = TicketManagementViewModel()
+    @State private var dependencyViewModel = DependencyViewModel()
 
     var body: some View {
-        GeometryReader { geometry in
-            VStack(spacing: 0) {
-                // Toolbar
-                ganttToolbar
+        ZStack(alignment: .trailing) {
+            GeometryReader { geometry in
+                VStack(spacing: 0) {
+                    // Toolbar
+                    ganttToolbar
 
-                Divider()
+                    Divider()
 
-                // Main chart area
-                ZStack(alignment: .topLeading) {
-                    // Canvas-rendered chart
-                    ganttCanvas(size: geometry.size)
+                    // Main chart area
+                    GeometryReader { chartGeometry in
+                        ZStack(alignment: .topLeading) {
+                            // Canvas-rendered chart
+                            ganttCanvas(size: chartGeometry.size)
 
-                    // Dependency arrows overlay
-                    DependencyArrowsOverlay(viewModel: viewModel)
+                            // Focused dependency overlay, shown only for the hovered/selected ticket.
+                            DependencyArrowsOverlay(viewModel: viewModel, focusedTicket: dependencyFocusTicket)
 
-                    // Sync indicator
-                    if viewModel.isSyncing {
-                        syncIndicator
-                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-                            .padding(DesignSystem.Spacing.spacing12)
+                            // Sync indicator
+                            if viewModel.isSyncing {
+                                syncIndicator
+                                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                                    .padding(DesignSystem.Spacing.spacing12)
+                            }
+
+                            if let hoveredTicket, selectedDetailTicket == nil {
+                                TimelineTicketHoverCard(ticket: hoveredTicket)
+                                    .position(hoverCardPosition(in: chartGeometry.size))
+                                    .transition(.opacity)
+                                    .allowsHitTesting(false)
+                            }
+                        }
+                        .clipped()
+                        .gesture(panGesture)
+                        .gesture(magnifyGesture)
+                        .onScrollWheelGesture { event in
+                            if event.modifierFlags.contains(.command) {
+                                viewModel.handleZoomGesture(delta: -event.scrollingDeltaY)
+                            } else {
+                                viewModel.pan(
+                                    by: viewModel.panTranslationForScrollWheel(
+                                        scrollingDeltaX: event.scrollingDeltaX,
+                                        scrollingDeltaY: event.scrollingDeltaY,
+                                        isShiftPressed: event.modifierFlags.contains(.shift)
+                                    ),
+                                    viewportSize: chartGeometry.size
+                                )
+                            }
+                        }
+                        .onContinuousHover { phase in
+                            switch phase {
+                            case .active(let location):
+                                hoverLocation = location
+                                hoveredTicket = viewModel.ticket(at: location)
+                            case .ended:
+                                hoveredTicket = nil
+                            }
+                        }
+                        .onAppear {
+                            viewSize = chartGeometry.size
+                        }
+                        .onChange(of: chartGeometry.size) { _, newSize in
+                            viewSize = newSize
+                        }
+                    }
+
+                    // Unscheduled section
+                    if !viewModel.unscheduledTickets.isEmpty {
+                        unscheduledSection
                     }
                 }
-                .clipped()
-                .gesture(panGesture)
-                .gesture(magnifyGesture)
-                .onScrollWheelGesture { event in
-                    if event.modifierFlags.contains(.command) {
-                        viewModel.handleZoomGesture(delta: -event.scrollingDeltaY)
+                .onAppear {
+                    viewSize = geometry.size
+                    configureTicketDetailDependencies()
+                    if !viewModel.hasAutoScrolledToToday {
+                        viewModel.scrollToToday(viewWidth: geometry.size.width)
                     }
                 }
+            }
 
-                // Unscheduled section
-                if !viewModel.unscheduledTickets.isEmpty {
-                    unscheduledSection
+            if let selectedDetailTicket {
+                HStack(spacing: 0) {
+                    Divider()
+                    TicketDetailSheet(
+                        viewModel: ticketDetailViewModel,
+                        dependencyViewModel: dependencyViewModel,
+                        ticket: selectedDetailTicket,
+                        members: viewModel.workspace?.members ?? [],
+                        presentation: .inspector,
+                        onClose: { self.selectedDetailTicket = nil },
+                        onOpenDependency: { linkedTicket in
+                            self.selectedDetailTicket = linkedTicket
+                            dependencyViewModel.evaluateConflictsForTicket(linkedTicket)
+                        }
+                    )
+                    .shadow(color: .black.opacity(0.22), radius: 22, x: -8, y: 0)
                 }
-            }
-            .onAppear {
-                viewSize = geometry.size
-                if !viewModel.hasAutoScrolledToToday {
-                    viewModel.scrollToToday(viewWidth: geometry.size.width)
-                }
-            }
-            .onChange(of: geometry.size) { _, newSize in
-                viewSize = newSize
+                .transition(.move(edge: .trailing).combined(with: .opacity))
             }
         }
+        .onChange(of: viewModel.workspace?.id) { _, _ in
+            configureTicketDetailDependencies()
+        }
+        .animation(.snappy(duration: 0.18), value: selectedDetailTicket?.id)
         .alert("Sync Error", isPresented: $viewModel.showError) {
             Button("OK") {
                 viewModel.errorMessage = nil
@@ -67,43 +130,94 @@ struct GanttChartView: View {
         }
     }
 
+    private func configureTicketDetailDependencies() {
+        ticketDetailViewModel.configure(
+            modelContext: modelContext,
+            syncEngine: nil,
+            workspace: viewModel.workspace
+        )
+        dependencyViewModel.configure(
+            modelContext: modelContext,
+            workspace: viewModel.workspace
+        )
+    }
+
+    private var dependencyFocusTicket: Ticket? {
+        selectedDetailTicket ?? hoveredTicket
+    }
+
     // MARK: - Toolbar
 
     private var ganttToolbar: some View {
         HStack(spacing: DesignSystem.Spacing.spacing12) {
-            Text("Timeline")
-                .font(DesignSystem.Typography.headingSmall)
-                .foregroundColor(DesignSystem.Colors.textPrimary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Timeline")
+                    .font(DesignSystem.Typography.headingSmall)
+                    .foregroundColor(DesignSystem.Colors.textPrimary)
+                Text("Feature delivery schedule by developer")
+                    .font(DesignSystem.Typography.caption)
+                    .foregroundColor(DesignSystem.Colors.textSecondary)
+            }
+
+            Picker("Milestone", selection: milestoneSelection) {
+                Text("All milestones").tag(UUID?.none)
+                ForEach(viewModel.availableSprints, id: \.id) { sprint in
+                    Text(sprint.name).tag(Optional(sprint.id))
+                }
+            }
+            .labelsHidden()
+            .frame(minWidth: 220, maxWidth: 360)
 
             Spacer()
 
             // Zoom controls
             HStack(spacing: DesignSystem.Spacing.spacing4) {
                 Button {
-                    viewModel.zoomIn()
-                } label: {
-                    Image(systemName: "minus.magnifyingglass")
-                        .font(.system(size: 14))
-                }
-                .buttonStyle(.plain)
-                .foregroundColor(DesignSystem.Colors.textSecondary)
-                .disabled(viewModel.zoomLevel == .day)
-
-                Text(viewModel.zoomLevel.label)
-                    .font(DesignSystem.Typography.caption)
-                    .foregroundColor(DesignSystem.Colors.textSecondary)
-                    .frame(width: 50)
-
-                Button {
                     viewModel.zoomOut()
                 } label: {
-                    Image(systemName: "plus.magnifyingglass")
+                    Image(systemName: "minus")
                         .font(.system(size: 14))
                 }
                 .buttonStyle(.plain)
                 .foregroundColor(DesignSystem.Colors.textSecondary)
-                .disabled(viewModel.zoomLevel == .quarter)
+                .disabled(viewModel.pointsPerDay <= viewModel.minimumPointsPerDay)
+
+                VStack(spacing: 1) {
+                    Text(viewModel.zoomLabel)
+                        .font(DesignSystem.Typography.caption)
+                    Text("\(Int(viewModel.pointsPerDay.rounded())) pt/day")
+                        .font(.system(size: 10, weight: .medium, design: .rounded))
+                        .foregroundColor(DesignSystem.Colors.textTertiary)
+                }
+                    .foregroundColor(DesignSystem.Colors.textSecondary)
+                    .frame(width: 72)
+
+                Button {
+                    viewModel.zoomIn()
+                } label: {
+                    Image(systemName: "plus")
+                        .font(.system(size: 14))
+                }
+                .buttonStyle(.plain)
+                .foregroundColor(DesignSystem.Colors.textSecondary)
+                .disabled(viewModel.pointsPerDay >= viewModel.maximumPointsPerDay)
             }
+
+            Text("\(viewModel.timelineRows.count) devs")
+                .font(DesignSystem.Typography.caption)
+                .foregroundColor(DesignSystem.Colors.textSecondary)
+                .padding(.horizontal, DesignSystem.Spacing.spacing8)
+                .padding(.vertical, 5)
+                .background(DesignSystem.Colors.surface)
+                .clipShape(RoundedRectangle(cornerRadius: DesignSystem.Radius.small))
+
+            Text("\(viewModel.scheduledTickets.count) scheduled")
+                .font(DesignSystem.Typography.caption)
+                .foregroundColor(DesignSystem.Colors.textSecondary)
+                .padding(.horizontal, DesignSystem.Spacing.spacing8)
+                .padding(.vertical, 5)
+                .background(DesignSystem.Colors.surface)
+                .clipShape(RoundedRectangle(cornerRadius: DesignSystem.Radius.small))
 
             // Today button
             Button {
@@ -124,6 +238,18 @@ struct GanttChartView: View {
         .background(DesignSystem.Colors.background)
     }
 
+    private var milestoneSelection: Binding<UUID?> {
+        Binding(
+            get: { viewModel.selectedSprint?.id },
+            set: { selectedId in
+                viewModel.selectedSprint = selectedId.flatMap { id in
+                    viewModel.availableSprints.first { $0.id == id }
+                }
+                viewModel.refreshData()
+            }
+        )
+    }
+
     // MARK: - Canvas
 
     private func ganttCanvas(size: CGSize) -> some View {
@@ -140,10 +266,17 @@ struct GanttChartView: View {
             // Draw today line
             drawTodayLine(context: &context, size: canvasSize, offsetX: offsetX, offsetY: offsetY)
 
-            // Draw ticket bars
-            drawTicketBars(context: &context, size: canvasSize, offsetX: offsetX, offsetY: offsetY)
+            // Draw developer rows and ticket bars
+            drawDeveloperRows(context: &context, size: canvasSize, offsetY: offsetY)
+            drawTicketBars(
+                context: &context,
+                size: canvasSize,
+                offsetX: offsetX,
+                offsetY: offsetY,
+                focusedTicket: dependencyFocusTicket
+            )
 
-            // Draw ticket labels on the left
+            // Draw developer labels on the left
             drawTicketLabels(context: &context, size: canvasSize, offsetY: offsetY)
 
         } symbols: {
@@ -152,6 +285,22 @@ struct GanttChartView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .contentShape(Rectangle())
         .gesture(ticketDragGesture)
+        .simultaneousGesture(ticketTapGesture)
+    }
+
+    private func hoverCardPosition(in size: CGSize) -> CGPoint {
+        let cardWidth: CGFloat = 320
+        let cardHeight: CGFloat = 300
+        let margin: CGFloat = 12
+        let preferredX = hoverLocation.x + cardWidth / 2 + 18
+        let preferredY = hoverLocation.y + cardHeight / 2 + 18
+        let minX = cardWidth / 2 + margin
+        let maxX = max(minX, size.width - cardWidth / 2 - margin)
+        let minY = cardHeight / 2 + margin
+        let maxY = max(minY, size.height - cardHeight / 2 - margin)
+        let x = min(max(preferredX, minX), maxX)
+        let y = min(max(preferredY, minY), maxY)
+        return CGPoint(x: x, y: y)
     }
 
     // MARK: - Canvas Drawing
@@ -231,83 +380,210 @@ struct GanttChartView: View {
         )
     }
 
-    private func drawTicketBars(context: inout GraphicsContext, size: CGSize, offsetX: CGFloat, offsetY: CGFloat) {
-        for (index, ticket) in viewModel.scheduledTickets.enumerated() {
-            let barX = viewModel.barXPosition(for: ticket) + offsetX
-            let barY = viewModel.barYPosition(forRow: index) + offsetY
-            let barWidth = viewModel.barWidth(for: ticket)
+    private func drawTicketBars(
+        context: inout GraphicsContext,
+        size: CGSize,
+        offsetX: CGFloat,
+        offsetY: CGFloat,
+        focusedTicket: Ticket?
+    ) {
+        let focusedIds = viewModel.focusedDependencyIds(for: focusedTicket)
 
-            // Apply drag offset if this ticket is being dragged
-            var adjustedBarX = barX
-            if viewModel.draggingTicket?.id == ticket.id {
-                adjustedBarX += viewModel.dragOffset
-            }
+        for (rowIndex, row) in viewModel.timelineRows.enumerated() {
+            for ticket in row.tickets {
+                let barX = viewModel.barXPosition(for: ticket) + offsetX
+                let barY = viewModel.barYPosition(for: ticket, in: row, rowIndex: rowIndex) + offsetY
+                let barWidth = viewModel.barWidth(for: ticket)
 
-            // Skip if not visible
-            guard adjustedBarX + barWidth >= viewModel.labelWidth && adjustedBarX <= size.width else { continue }
-            guard barY + viewModel.rowHeight >= viewModel.headerHeight && barY <= size.height else { continue }
+                var adjustedBarX = barX
+                if viewModel.draggingTicket?.id == ticket.id {
+                    adjustedBarX += viewModel.dragOffset
+                }
 
-            // Draw bar
-            let barRect = CGRect(
-                x: adjustedBarX,
-                y: barY,
-                width: barWidth,
-                height: viewModel.rowHeight
-            )
+                guard adjustedBarX + barWidth >= viewModel.labelWidth && adjustedBarX <= size.width else { continue }
+                guard barY + viewModel.rowHeight >= viewModel.headerHeight && barY <= size.height else { continue }
 
-            let roundedPath = Path(roundedRect: barRect, cornerRadius: DesignSystem.Radius.small)
+                let barRect = CGRect(
+                    x: adjustedBarX,
+                    y: barY,
+                    width: max(barWidth, 12),
+                    height: viewModel.rowHeight
+                )
+                let roundedPath = Path(roundedRect: barRect, cornerRadius: DesignSystem.Radius.small)
+                let isFocused = focusedIds.isEmpty || focusedIds.contains(ticket.id)
+                let isCenterFocus = focusedTicket?.id == ticket.id
+                let fillColor = viewModel.barColor(for: ticket).opacity(isFocused ? 1 : 0.24)
+                let borderColor = isCenterFocus
+                    ? DesignSystem.Colors.accent
+                    : viewModel.barBorderColor(for: ticket).opacity(isFocused ? 1 : 0.35)
 
-            // Fill
-            let fillColor = viewModel.barColor(for: ticket)
-            context.fill(roundedPath, with: .color(fillColor))
+                context.fill(roundedPath, with: .color(fillColor))
+                context.stroke(
+                    roundedPath,
+                    with: .color(borderColor),
+                    lineWidth: isCenterFocus ? 2 : (viewModel.hasConflict(ticket) ? 2 : 1)
+                )
 
-            // Border
-            let borderColor = viewModel.barBorderColor(for: ticket)
-            let borderWidth: CGFloat = viewModel.hasConflict(ticket) ? 2 : 1
-            context.stroke(roundedPath, with: .color(borderColor), lineWidth: borderWidth)
+                if barWidth > 54 {
+                    let titleLimit = max(8, min(48, Int(barWidth / 7)))
+                    let titleText = Text(String(ticket.title.prefix(titleLimit)))
+                        .font(DesignSystem.Typography.caption)
+                        .foregroundColor(barTextColor.opacity(isFocused ? 1 : 0.35))
 
-            // Title text inside bar (if wide enough)
-            if barWidth > 60 {
-                let titleText = Text(String(ticket.title.prefix(30)))
-                    .font(DesignSystem.Typography.caption)
-                    .foregroundColor(DesignSystem.Colors.textPrimary)
+                    context.draw(
+                        context.resolve(titleText),
+                        at: CGPoint(x: adjustedBarX + 8, y: barY + viewModel.rowHeight / 2),
+                        anchor: .leading
+                    )
+                }
 
-                context.draw(
-                    context.resolve(titleText),
-                    at: CGPoint(x: adjustedBarX + 8, y: barY + viewModel.rowHeight / 2),
-                    anchor: .leading
+                if let storyPoints = ticket.storyPoints, barWidth > 30 {
+                    let hasDependencyMarker = (ticket.blockedBy.count + ticket.blocks.count) > 0 && barWidth > 48
+                    let trailingPadding: CGFloat = hasDependencyMarker ? 28 : 10
+                    let pointsText = Text("\(storyPoints)")
+                        .font(.system(size: 10, weight: .bold, design: .rounded))
+                        .foregroundColor(barTextColor.opacity(isFocused ? 1 : 0.35))
+
+                    context.draw(
+                        context.resolve(pointsText),
+                        at: CGPoint(x: adjustedBarX + barRect.width - trailingPadding, y: barY + viewModel.rowHeight / 2),
+                        anchor: .trailing
+                    )
+                }
+
+                drawDependencyMarker(
+                    context: &context,
+                    ticket: ticket,
+                    barRect: barRect,
+                    isFocused: isFocused
                 )
             }
+        }
+    }
+
+    private func drawDependencyMarker(
+        context: inout GraphicsContext,
+        ticket: Ticket,
+        barRect: CGRect,
+        isFocused: Bool
+    ) {
+        let dependencyCount = ticket.blockedBy.count + ticket.blocks.count
+        guard dependencyCount > 0, barRect.width > 48 else { return }
+
+        let markerDiameter: CGFloat = 16
+        let markerRect = CGRect(
+            x: barRect.maxX - markerDiameter - 4,
+            y: barRect.minY + (barRect.height - markerDiameter) / 2,
+            width: markerDiameter,
+            height: markerDiameter
+        )
+        context.fill(
+            Path(ellipseIn: markerRect),
+            with: .color(DesignSystem.Colors.surfaceElevated.opacity(isFocused ? 0.82 : 0.35))
+        )
+
+        let text = Text("\(dependencyCount)")
+            .font(.system(size: 9, weight: .bold, design: .rounded))
+            .foregroundColor(barTextColor.opacity(isFocused ? 0.9 : 0.35))
+        context.draw(
+            context.resolve(text),
+            at: CGPoint(x: markerRect.midX, y: markerRect.midY),
+            anchor: .center
+        )
+    }
+
+    private func drawDeveloperRows(context: inout GraphicsContext, size: CGSize, offsetY: CGFloat) {
+        for (rowIndex, row) in viewModel.timelineRows.enumerated() {
+            let y = viewModel.rowYPosition(forRow: rowIndex) + offsetY
+            let height = viewModel.rowHeight(for: row)
+
+            guard y + height >= viewModel.headerHeight && y <= size.height else { continue }
+
+            let rowRect = CGRect(x: 0, y: y, width: size.width, height: height)
+            context.fill(
+                Path(rowRect),
+                with: .color(rowIndex.isMultiple(of: 2) ? DesignSystem.Colors.background : DesignSystem.Colors.surface.opacity(0.35))
+            )
+
+            var separator = Path()
+            separator.move(to: CGPoint(x: 0, y: y + height))
+            separator.addLine(to: CGPoint(x: size.width, y: y + height))
+            context.stroke(separator, with: .color(DesignSystem.Colors.border.opacity(0.7)), lineWidth: 0.5)
         }
     }
 
     private func drawTicketLabels(context: inout GraphicsContext, size: CGSize, offsetY: CGFloat) {
         // Label background
         let labelBgRect = CGRect(x: 0, y: viewModel.headerHeight, width: viewModel.labelWidth, height: size.height - viewModel.headerHeight)
-        context.fill(Path(labelBgRect), with: .color(DesignSystem.Colors.background))
+        context.fill(Path(labelBgRect), with: .color(DesignSystem.Colors.surface))
 
-        // Right border for label area
+        for (rowIndex, row) in viewModel.timelineRows.enumerated() {
+            let y = viewModel.rowYPosition(forRow: rowIndex) + offsetY
+            let rowHeight = viewModel.rowHeight(for: row)
+
+            guard y + rowHeight >= viewModel.headerHeight && y <= size.height else { continue }
+
+            let avatarRect = CGRect(x: 16, y: y + 14, width: 44, height: 44)
+            let avatarColor = row.member.map { member in
+                Color(hue: Double(abs(member.id.hashValue) % 360) / 360.0, saturation: 0.55, brightness: 0.75)
+            } ?? DesignSystem.Colors.accentSoft
+            context.fill(Path(ellipseIn: avatarRect), with: .color(avatarColor))
+
+            let initialsText = Text(row.initials)
+                .font(.system(size: 15, weight: .bold, design: .rounded))
+                .foregroundColor(.white)
+            context.draw(
+                context.resolve(initialsText),
+                at: CGPoint(x: avatarRect.midX, y: avatarRect.midY),
+                anchor: .center
+            )
+
+            let textX: CGFloat = 74
+            let maxCharacters = max(12, Int((viewModel.labelWidth - textX - 18) / 7))
+
+            let titleText = Text(truncatedLabel(row.title, maxCharacters: maxCharacters))
+                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                .foregroundColor(DesignSystem.Colors.textPrimary)
+
+            context.draw(
+                context.resolve(titleText),
+                at: CGPoint(x: textX, y: y + 24),
+                anchor: .leading
+            )
+
+            let subtitleText = Text(truncatedLabel(row.subtitle, maxCharacters: maxCharacters))
+                .font(.system(size: 11, weight: .medium, design: .rounded))
+                .foregroundColor(DesignSystem.Colors.textSecondary)
+            context.draw(
+                context.resolve(subtitleText),
+                at: CGPoint(x: textX, y: y + 43),
+                anchor: .leading
+            )
+
+            let countText = Text("\(row.tickets.count) features")
+                .font(.system(size: 10, weight: .medium, design: .rounded))
+                .foregroundColor(DesignSystem.Colors.textTertiary)
+            context.draw(
+                context.resolve(countText),
+                at: CGPoint(x: textX, y: y + 60),
+                anchor: .leading
+            )
+        }
+
+        // Draw the boundary last so the timeline lane always has a clean edge.
         var borderPath = Path()
         borderPath.move(to: CGPoint(x: viewModel.labelWidth, y: viewModel.headerHeight))
         borderPath.addLine(to: CGPoint(x: viewModel.labelWidth, y: size.height))
         context.stroke(borderPath, with: .color(DesignSystem.Colors.border), lineWidth: 1)
+    }
 
-        for (index, ticket) in viewModel.scheduledTickets.enumerated() {
-            let y = viewModel.barYPosition(forRow: index) + offsetY
+    private var barTextColor: Color {
+        DesignSystem.Colors.timelineBarText
+    }
 
-            guard y + viewModel.rowHeight >= viewModel.headerHeight && y <= size.height else { continue }
-
-            let truncatedTitle = String(ticket.title.prefix(25))
-            let labelText = Text(truncatedTitle)
-                .font(DesignSystem.Typography.caption)
-                .foregroundColor(DesignSystem.Colors.textPrimary)
-
-            context.draw(
-                context.resolve(labelText),
-                at: CGPoint(x: DesignSystem.Spacing.spacing8, y: y + viewModel.rowHeight / 2),
-                anchor: .leading
-            )
-        }
+    private func truncatedLabel(_ value: String, maxCharacters: Int) -> String {
+        guard value.count > maxCharacters else { return value }
+        return String(value.prefix(max(1, maxCharacters - 3))) + "..."
     }
 
     // MARK: - Unscheduled Section
@@ -352,7 +628,7 @@ struct GanttChartView: View {
                 viewModel.pan(by: CGSize(
                     width: value.translation.width / 10,
                     height: value.translation.height / 10
-                ))
+                ), viewportSize: viewSize)
             }
     }
 
@@ -383,15 +659,17 @@ struct GanttChartView: View {
 
                 // Determine which ticket is being dragged
                 if viewModel.draggingTicket == nil {
-                    for (index, ticket) in viewModel.scheduledTickets.enumerated() {
-                        let barX = viewModel.barXPosition(for: ticket) + offsetX
-                        let barY = viewModel.barYPosition(forRow: index) + offsetY
-                        let barWidth = viewModel.barWidth(for: ticket)
+                    for (rowIndex, row) in viewModel.timelineRows.enumerated() {
+                        for ticket in row.tickets {
+                            let barX = viewModel.barXPosition(for: ticket) + offsetX
+                            let barY = viewModel.barYPosition(for: ticket, in: row, rowIndex: rowIndex) + offsetY
+                            let barWidth = viewModel.barWidth(for: ticket)
 
-                        let barRect = CGRect(x: barX, y: barY, width: barWidth, height: viewModel.rowHeight)
-                        if barRect.contains(location) {
-                            viewModel.beginDrag(ticket: ticket)
-                            break
+                            let barRect = CGRect(x: barX, y: barY, width: barWidth, height: viewModel.rowHeight)
+                            if barRect.contains(location) {
+                                viewModel.beginDrag(ticket: ticket)
+                                break
+                            }
                         }
                     }
                 }
@@ -405,6 +683,15 @@ struct GanttChartView: View {
                     Task {
                         await viewModel.endDrag()
                     }
+                }
+            }
+    }
+
+    private var ticketTapGesture: some Gesture {
+        SpatialTapGesture()
+            .onEnded { value in
+                if let ticket = viewModel.ticket(at: value.location) {
+                    selectedDetailTicket = ticket
                 }
             }
     }
@@ -469,6 +756,92 @@ struct UnscheduledTicketChip: View {
     }
 }
 
+// MARK: - Timeline Ticket Hover Card
+
+private struct TimelineTicketHoverCard: View {
+    let ticket: Ticket
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: DesignSystem.Spacing.spacing12) {
+            Text(ticket.title)
+                .font(.system(size: 18, weight: .bold, design: .rounded))
+                .foregroundColor(DesignSystem.Colors.textPrimary)
+                .lineLimit(3)
+
+            VStack(alignment: .leading, spacing: DesignSystem.Spacing.spacing8) {
+                infoRow("Status", value: statusLabel, valueColor: statusColor)
+                infoRow("Start", value: formattedDate(ticket.startDate))
+                infoRow("Due", value: formattedDate(ticket.endDate), valueColor: DesignSystem.Colors.warning)
+                infoRow("Story Points", value: ticket.storyPoints.map { "\($0) SP" } ?? "Unestimated", valueColor: DesignSystem.Colors.accent)
+                infoRow("Milestone", value: ticket.sprint?.name ?? "No milestone")
+                infoRow("Priority", value: priorityLabel)
+            }
+        }
+        .padding(DesignSystem.Spacing.spacing16)
+        .frame(width: 320, alignment: .leading)
+        .background(DesignSystem.Colors.surfaceElevated)
+        .clipShape(RoundedRectangle(cornerRadius: DesignSystem.Radius.large))
+        .overlay(
+            RoundedRectangle(cornerRadius: DesignSystem.Radius.large)
+                .stroke(DesignSystem.Colors.border, lineWidth: 1)
+        )
+        .shadow(color: Color.black.opacity(0.24), radius: 18, x: 0, y: 10)
+    }
+
+    private var statusColor: Color {
+        switch ticket.status {
+        case .done:
+            return DesignSystem.Colors.success
+        case .inProgress:
+            return DesignSystem.Colors.accent
+        case .inReview:
+            return DesignSystem.Colors.warning
+        case .todo, .backlog:
+            return DesignSystem.Colors.textSecondary
+        }
+    }
+
+    private var statusLabel: String {
+        switch ticket.status {
+        case .backlog: return "Backlog"
+        case .todo: return "Todo"
+        case .inProgress: return "In Progress"
+        case .inReview: return "In Review"
+        case .done: return "Completed"
+        }
+    }
+
+    private var priorityLabel: String {
+        switch ticket.priority {
+        case .critical: return "Critical"
+        case .high: return "High"
+        case .medium: return "Medium"
+        case .low: return "Low"
+        case nil: return "None"
+        }
+    }
+
+    private func infoRow(_ label: String, value: String, valueColor: Color = DesignSystem.Colors.textPrimary) -> some View {
+        HStack(alignment: .top, spacing: DesignSystem.Spacing.spacing12) {
+            Text(label)
+                .font(DesignSystem.Typography.bodyRegular)
+                .foregroundColor(DesignSystem.Colors.textSecondary)
+                .frame(width: 105, alignment: .leading)
+            Text(value)
+                .font(DesignSystem.Typography.bodyRegular)
+                .foregroundColor(valueColor)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func formattedDate(_ date: Date?) -> String {
+        guard let date else { return "No date" }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "d MMM yyyy"
+        return formatter.string(from: date)
+    }
+}
+
 // MARK: - Scroll Wheel Gesture Modifier
 
 /// A view modifier that captures scroll wheel events for zoom handling.
@@ -495,13 +868,59 @@ struct ScrollWheelView: NSViewRepresentable {
     func updateNSView(_ nsView: ScrollWheelNSView, context: Context) {
         nsView.handler = handler
     }
+
+    static func dismantleNSView(_ nsView: ScrollWheelNSView, coordinator: ()) {
+        nsView.stopMonitoring()
+    }
 }
 
-class ScrollWheelNSView: NSView {
+final class ScrollWheelNSView: NSView {
     var handler: ((NSEvent) -> Void)?
+    private var scrollMonitor: Any?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+
+        if window == nil {
+            stopMonitoring()
+        } else {
+            startMonitoringIfNeeded()
+        }
+    }
 
     override func scrollWheel(with event: NSEvent) {
         handler?(event)
+    }
+
+    private func startMonitoringIfNeeded() {
+        guard scrollMonitor == nil else { return }
+
+        scrollMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+            guard let self, self.shouldHandle(event) else {
+                return event
+            }
+
+            self.handler?(event)
+            return nil
+        }
+    }
+
+    private func shouldHandle(_ event: NSEvent) -> Bool {
+        guard let window, event.window === window else { return false }
+
+        let location = convert(event.locationInWindow, from: nil)
+        return bounds.contains(location)
+    }
+
+    func stopMonitoring() {
+        if let scrollMonitor {
+            NSEvent.removeMonitor(scrollMonitor)
+            self.scrollMonitor = nil
+        }
+    }
+
+    deinit {
+        stopMonitoring()
     }
 }
 

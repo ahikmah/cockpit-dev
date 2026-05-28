@@ -3,7 +3,7 @@ import XCTest
 
 /// Unit tests for GitLabOAuthService covering token storage, refresh, expiry detection,
 /// disconnection, and PKCE code generation.
-final class GitLabOAuthServiceTests: XCTestCase {
+final class GitLabOAuthServiceTests: CockpitDevTestCase {
 
     private var encryptionService: EncryptionService!
     private var oauthService: GitLabOAuthService!
@@ -11,7 +11,10 @@ final class GitLabOAuthServiceTests: XCTestCase {
     override func setUp() {
         super.setUp()
         // Use a unique service identifier to avoid conflicts with production Keychain entries
-        encryptionService = EncryptionService(serviceIdentifier: "com.cockpitdev.tests.oauth.\(UUID().uuidString)")
+        encryptionService = EncryptionService(
+            serviceIdentifier: "com.cockpitdev.tests.oauth.\(UUID().uuidString)",
+            keychainStorage: InMemoryKeychainStorage()
+        )
         oauthService = GitLabOAuthService(encryptionService: encryptionService)
     }
 
@@ -57,6 +60,32 @@ final class GitLabOAuthServiceTests: XCTestCase {
         } catch {
             XCTFail("Unexpected error type: \(error)")
         }
+    }
+
+    func testWarmCredentialCacheDoesNotRequireStoredToken() async {
+        await oauthService.warmCredentialCache()
+
+        let hasToken = await oauthService.hasValidToken()
+        XCTAssertFalse(hasToken)
+    }
+
+    func testWarmCredentialCacheKeepsStoredTokenUsable() async throws {
+        let tokenData = StoredTokenData(
+            accessToken: "access-token",
+            refreshToken: "refresh-token",
+            expiresAt: Date().addingTimeInterval(3_600),
+            instanceURL: "https://gitlab.example.com",
+            scope: "api"
+        )
+        let encoded = try JSONEncoder().encode(tokenData)
+        let jsonString = try XCTUnwrap(String(data: encoded, encoding: .utf8))
+        try encryptionService.storeInKeychain(key: "gitlab.oauth.tokenData", value: jsonString)
+        try encryptionService.storeInKeychain(key: "gitlab.oauth.clientId", value: "client-id")
+
+        await oauthService.warmCredentialCache()
+
+        let token = try await oauthService.getValidToken()
+        XCTAssertEqual(token, "access-token")
     }
 
     // MARK: - Disconnect Tests

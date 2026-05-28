@@ -7,7 +7,7 @@ import XCTest
 /// - Status conflict detection
 /// - Workspace-wide and per-ticket evaluation
 /// - Automatic conflict resolution
-final class DependencyConflictEngineTests: XCTestCase {
+final class DependencyConflictEngineTests: CockpitDevTestCase {
 
     var engine: DependencyConflictEngine!
 

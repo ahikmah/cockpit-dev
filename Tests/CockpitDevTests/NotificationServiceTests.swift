@@ -2,7 +2,7 @@ import XCTest
 import SwiftData
 @testable import CockpitDev
 
-final class NotificationServiceTests: XCTestCase {
+final class NotificationServiceTests: CockpitDevTestCase {
 
     private var service: NotificationService!
     private var modelContainer: ModelContainer!
@@ -101,7 +101,8 @@ final class NotificationServiceTests: XCTestCase {
 
     @MainActor
     func testNotificationCapEvictsOldest() async {
-        // Insert 500 notifications
+        // Persist incrementally, matching production delivery behavior and avoiding
+        // a large graph of temporary SwiftData relationship identifiers.
         for i in 0..<500 {
             let notification = AppNotification(
                 eventType: .newMergeRequest,
@@ -111,8 +112,8 @@ final class NotificationServiceTests: XCTestCase {
             )
             notification.workspace = workspace
             modelContext.insert(notification)
+            try! modelContext.save()
         }
-        try! modelContext.save()
 
         XCTAssertEqual(workspace.notifications.count, 500)
 

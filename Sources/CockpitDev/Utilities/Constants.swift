@@ -45,6 +45,9 @@ enum AppConstants {
     /// Default GitLab instance URL.
     static let defaultGitLabInstanceURL: String = "https://gitlab.com"
 
+    /// OpenSpec PM API that owns timeline planning metadata.
+    static let openSpecPMInstanceURL: String = "https://ospm.devyard.space"
+
     /// Maximum retry attempts for API requests.
     static let maxRetryAttempts: Int = 3
 

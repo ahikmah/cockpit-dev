@@ -3,7 +3,7 @@ import SwiftData
 @testable import CockpitDev
 
 @MainActor
-final class WorkspaceListViewModelTests: XCTestCase {
+final class WorkspaceListViewModelTests: CockpitDevTestCase {
 
     private var viewModel: WorkspaceListViewModel!
     private var modelContainer: ModelContainer!

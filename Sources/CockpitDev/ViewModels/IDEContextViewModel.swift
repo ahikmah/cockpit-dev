@@ -152,9 +152,9 @@ class IDEContextViewModel {
             repos: reposToClone,
             baseDirectory: baseDirectory,
             credentials: credentials,
-            progressHandler: { [weak self] repo, progress in
+            progressHandler: { [weak self] repository, progress in
                 Task { @MainActor [weak self] in
-                    self?.cloneProgress[repo.id] = progress
+                    self?.cloneProgress[repository.id] = progress
                 }
             }
         )

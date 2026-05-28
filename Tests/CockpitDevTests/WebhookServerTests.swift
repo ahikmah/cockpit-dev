@@ -2,7 +2,7 @@ import XCTest
 @testable import CockpitDev
 
 /// Integration tests for the WebhookServer.
-final class WebhookServerTests: XCTestCase {
+final class WebhookServerTests: CockpitDevTestCase {
 
     // MARK: - Token Validation Tests
 

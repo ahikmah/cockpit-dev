@@ -28,9 +28,6 @@ build/
 Secrets/
 credentials.json
 
-# Kiro
-.kiro/
-
 # IDE
 .vscode/
 *.code-workspace

@@ -3,7 +3,7 @@ import SwiftData
 @testable import CockpitDev
 
 @MainActor
-final class AnalyticsViewModelTests: XCTestCase {
+final class AnalyticsViewModelTests: CockpitDevTestCase {
 
     private var viewModel: AnalyticsViewModel!
     private var modelContext: ModelContext!
@@ -81,7 +81,12 @@ final class AnalyticsViewModelTests: XCTestCase {
         assignee: Member? = nil,
         sprint: Sprint? = nil,
         startDate: Date? = nil,
+        endDate: Date? = nil,
+        createdAt: Date = Date(),
         updatedAt: Date = Date(),
+        realizedAt: Date? = nil,
+        realizationSource: TicketRealizationSource? = nil,
+        realizationReference: String? = nil,
         labels: [String] = []
     ) -> Ticket {
         let ticket = Ticket(
@@ -89,8 +94,13 @@ final class AnalyticsViewModelTests: XCTestCase {
             status: status,
             storyPoints: storyPoints,
             startDate: startDate,
+            endDate: endDate,
             labels: labels,
-            updatedAt: updatedAt
+            createdAt: createdAt,
+            updatedAt: updatedAt,
+            realizedAt: realizedAt,
+            realizationSource: realizationSource,
+            realizationReference: realizationReference
         )
         ticket.workspace = workspace
         ticket.assignee = assignee
@@ -209,11 +219,11 @@ final class AnalyticsViewModelTests: XCTestCase {
         viewModel.configure(workspace: workspace, modelContext: modelContext)
 
         XCTAssertEqual(viewModel.workloadData.count, 2)
-        // Sorted by SP descending
-        XCTAssertEqual(viewModel.workloadData[0].member.username, "alice")
-        XCTAssertEqual(viewModel.workloadData[0].assignedStoryPoints, 13) // 8 + 5
-        XCTAssertEqual(viewModel.workloadData[1].member.username, "bob")
-        XCTAssertEqual(viewModel.workloadData[1].assignedStoryPoints, 13)
+        let workloadByUsername = Dictionary(
+            uniqueKeysWithValues: viewModel.workloadData.map { ($0.member.username, $0.assignedStoryPoints) }
+        )
+        XCTAssertEqual(workloadByUsername["alice"], 13) // 8 + 5
+        XCTAssertEqual(workloadByUsername["bob"], 13)
     }
 
     func testWorkloadDistribution_overloadIndicator() {
@@ -352,7 +362,7 @@ final class AnalyticsViewModelTests: XCTestCase {
     }
 
     func testContributions_mergeRequestsMerged() {
-        let member = createMember(displayName: "Alice", username: "alice")
+        _ = createMember(displayName: "Alice", username: "alice")
         let repo = createRepository(name: "backend")
 
         _ = createMergeRequest(authorUsername: "alice", state: .merged, repository: repo)
@@ -364,6 +374,156 @@ final class AnalyticsViewModelTests: XCTestCase {
         let aliceData = viewModel.contributionData.first { $0.member.username == "alice" }
         XCTAssertNotNil(aliceData)
         XCTAssertEqual(aliceData?.mergeRequestsMerged, 2)
+    }
+
+    // MARK: - Developer Performance Tests
+
+    func testDeveloperPerformanceUsesPlanningDatesAndClosedRealization() {
+        let member = createMember(displayName: "Alice", username: "alice")
+        let created = Date(timeIntervalSince1970: 1_800_000_000)
+        let start = created.addingTimeInterval(86_400)
+        let due = start.addingTimeInterval(86_400 * 3)
+        let closed = due.addingTimeInterval(-86_400)
+
+        _ = createTicket(
+            title: "Closed",
+            status: .done,
+            storyPoints: 8,
+            assignee: member,
+            startDate: start,
+            endDate: due,
+            createdAt: created,
+            updatedAt: closed
+        )
+        _ = createTicket(
+            title: "Open",
+            status: .inProgress,
+            storyPoints: 5,
+            assignee: member,
+            startDate: start,
+            endDate: due,
+            createdAt: created
+        )
+
+        viewModel.configure(workspace: workspace, modelContext: modelContext)
+
+        let point = try! XCTUnwrap(viewModel.developerPerformanceData.first)
+        XCTAssertEqual(point.plannedTickets, 2)
+        XCTAssertEqual(point.completedTickets, 1)
+        XCTAssertEqual(point.committedStoryPoints, 13)
+        XCTAssertEqual(point.completedStoryPoints, 8)
+        XCTAssertEqual(point.openStoryPoints, 5)
+        XCTAssertEqual(point.averageRealizationDays ?? 0, 2.0, accuracy: 0.1)
+        XCTAssertEqual(point.onTimeRate ?? 0, 1.0, accuracy: 0.01)
+        XCTAssertEqual(point.averageScheduleVarianceDays ?? 0, -1.0, accuracy: 0.1)
+        XCTAssertEqual(viewModel.plannedStoryPoints, 13)
+        XCTAssertEqual(viewModel.completedStoryPoints, 8)
+        XCTAssertEqual(viewModel.openStoryPoints, 5)
+        XCTAssertEqual(viewModel.closureTrendData.first?.storyPointsClosed, 8)
+    }
+
+    func testOnTimeTreatsDueDateAsInclusive() {
+        let member = createMember(displayName: "Alice", username: "alice")
+        let calendar = Calendar.current
+        let due = calendar.date(from: DateComponents(year: 2026, month: 4, day: 15))!
+        let closedOnDueDate = calendar.date(bySettingHour: 22, minute: 30, second: 0, of: due)!
+
+        _ = createTicket(
+            title: "Closed on due date",
+            status: .done,
+            storyPoints: 5,
+            assignee: member,
+            endDate: due,
+            updatedAt: closedOnDueDate
+        )
+
+        viewModel.configure(workspace: workspace, modelContext: modelContext)
+
+        XCTAssertEqual(viewModel.onTimeCompletionRate ?? 0, 1.0, accuracy: 0.01)
+        XCTAssertEqual(viewModel.averageScheduleVarianceDays ?? -99, 0, accuracy: 0.01)
+    }
+
+    func testDeadlineAppealExcludesApprovedLateTicketFromPenalty() {
+        let member = createMember(displayName: "Alice", username: "alice")
+        let calendar = Calendar.current
+        let due = calendar.date(from: DateComponents(year: 2026, month: 4, day: 15))!
+        let onTimeClosed = calendar.date(bySettingHour: 12, minute: 0, second: 0, of: due)!
+        let lateClosed = calendar.date(from: DateComponents(year: 2026, month: 4, day: 18))!
+
+        _ = createTicket(
+            title: "On time",
+            status: .done,
+            storyPoints: 5,
+            assignee: member,
+            endDate: due,
+            updatedAt: onTimeClosed
+        )
+        let lateTicket = createTicket(
+            title: "Lead reprioritized",
+            status: .done,
+            storyPoints: 8,
+            assignee: member,
+            endDate: due,
+            updatedAt: lateClosed
+        )
+
+        viewModel.configure(workspace: workspace, modelContext: modelContext)
+
+        XCTAssertEqual(viewModel.onTimeCompletionRate ?? 0, 0.5, accuracy: 0.01)
+        XCTAssertEqual(viewModel.deadlineRiskData.count, 1)
+        XCTAssertEqual(viewModel.lateTicketCount, 1)
+
+        viewModel.approveDeadlineException(for: lateTicket, reason: "Moved to urgent production support")
+
+        XCTAssertEqual(viewModel.onTimeCompletionRate ?? 0, 1.0, accuracy: 0.01)
+        XCTAssertEqual(viewModel.lateTicketCount, 0)
+        XCTAssertEqual(viewModel.approvedDeadlineExceptionCount, 1)
+        XCTAssertEqual(viewModel.deadlineRiskData.first?.appealStatus, .approved)
+    }
+
+    func testOnTimeUsesMRCommitRealizationDateInsteadOfIssueClosedDate() {
+        let member = createMember(displayName: "Alice", username: "alice")
+        let calendar = Calendar.current
+        let due = calendar.date(from: DateComponents(year: 2026, month: 4, day: 15))!
+        let realizedByCommit = calendar.date(bySettingHour: 21, minute: 30, second: 0, of: due)!
+        let closedLate = calendar.date(from: DateComponents(year: 2026, month: 4, day: 18))!
+
+        _ = createTicket(
+            title: "Closed late but MR commit was on time",
+            status: .done,
+            storyPoints: 5,
+            assignee: member,
+            endDate: due,
+            updatedAt: closedLate,
+            realizedAt: realizedByCommit,
+            realizationSource: .mrCommit,
+            realizationReference: "!7 abc123"
+        )
+
+        viewModel.configure(workspace: workspace, modelContext: modelContext)
+
+        XCTAssertEqual(viewModel.onTimeCompletionRate ?? 0, 1.0, accuracy: 0.01)
+        XCTAssertEqual(viewModel.averageScheduleVarianceDays ?? -99, 0, accuracy: 0.01)
+        XCTAssertTrue(viewModel.deadlineRiskData.isEmpty)
+    }
+
+    func testOpenOverdueTicketAppearsInDeadlineRisk() {
+        let member = createMember(displayName: "Alice", username: "alice")
+        let overdue = Calendar.current.date(byAdding: .day, value: -3, to: Date())!
+
+        _ = createTicket(
+            title: "Still open",
+            status: .inProgress,
+            storyPoints: 3,
+            assignee: member,
+            endDate: overdue
+        )
+
+        viewModel.configure(workspace: workspace, modelContext: modelContext)
+
+        XCTAssertEqual(viewModel.deadlineRiskData.count, 1)
+        XCTAssertEqual(viewModel.deadlineRiskData.first?.isOpen, true)
+        XCTAssertEqual(viewModel.lateTicketCount, 1)
     }
 
     // MARK: - Filter Tests

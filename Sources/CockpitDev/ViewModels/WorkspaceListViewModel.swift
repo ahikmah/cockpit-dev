@@ -56,6 +56,9 @@ class WorkspaceListViewModel {
 
         do {
             workspaces = try modelContext.fetch(descriptor)
+            if let selectedId = selectedWorkspace?.id {
+                selectedWorkspace = workspaces.first { $0.id == selectedId }
+            }
         } catch {
             showErrorMessage("Failed to load workspaces: \(error.localizedDescription)")
         }

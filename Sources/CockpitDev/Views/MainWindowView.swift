@@ -6,6 +6,7 @@ import SwiftData
 /// Represents the available tabs in the workspace detail view.
 enum WorkspaceTab: String, CaseIterable, Identifiable {
     case board = "Board"
+    case tickets = "Tickets"
     case timeline = "Timeline"
     case sprints = "Sprints"
     case mergeRequests = "MRs"
@@ -19,6 +20,7 @@ enum WorkspaceTab: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .board: return "rectangle.split.3x1"
+        case .tickets: return "ticket"
         case .timeline: return "chart.bar.xaxis"
         case .sprints: return "flag"
         case .mergeRequests: return "arrow.triangle.merge"
@@ -33,38 +35,59 @@ enum WorkspaceTab: String, CaseIterable, Identifiable {
 // MARK: - Main Window View
 
 /// Main application window displayed after successful authentication.
-/// Contains a NavigationSplitView with workspace sidebar and detail TabView.
+/// Contains the workspace sidebar and detail tab surface.
 struct MainWindowView: View {
 
     @Environment(\.modelContext) private var modelContext
+    @Environment(\.credentialServices) private var credentialServices
     @Environment(WindowStateService.self) private var windowStateService: WindowStateService?
     @Environment(KeyboardShortcutState.self) private var shortcutState: KeyboardShortcutState?
+    @Query(sort: \MergeRequestEntry.updatedAt, order: .reverse) private var mergeRequests: [MergeRequestEntry]
+    @AppStorage(AppearancePreference.storageKey) private var appearancePreference = AppearancePreference.system.rawValue
     @State private var viewModel = WorkspaceListViewModel()
     @State private var selectedTab: WorkspaceTab = .board
+    @State private var syncedWorkspaceIds: Set<UUID> = []
+    @State private var syncingWorkspaceIds: Set<UUID> = []
+    @State private var workspaceSyncRevision: [UUID: Int] = [:]
+    @State private var planningSyncError: String?
+    @State private var isRefreshingPlanningMetadata = false
 
     var body: some View {
-        NavigationSplitView {
+        HStack(spacing: 0) {
             WorkspaceListView(viewModel: viewModel)
-        } detail: {
-            if let workspace = viewModel.selectedWorkspace {
-                workspaceDetailView(for: workspace)
-            } else {
-                emptyDetailView
+
+            VStack(spacing: 0) {
+                if let workspace = viewModel.selectedWorkspace {
+                    workspaceDetailView(for: workspace)
+                } else {
+                    emptyDetailView
+                }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(minWidth: 900, minHeight: 600)
+        .background(DesignSystem.Colors.background)
         .onAppear {
             viewModel.configure(with: modelContext)
             // Restore persisted tab selection
             if let windowState = windowStateService {
                 selectedTab = windowState.restoredTab
             }
+            Task {
+                await syncSelectedWorkspaceIfNeeded()
+            }
         }
         .onChange(of: selectedTab) { _, newTab in
             windowStateService?.selectTab(newTab)
+            Task {
+                await syncSelectedWorkspaceIfNeeded()
+            }
         }
         .onChange(of: viewModel.selectedWorkspace?.id) { _, newId in
             windowStateService?.selectWorkspace(id: newId)
+            Task {
+                await syncSelectedWorkspaceIfNeeded()
+            }
         }
     }
 
@@ -81,48 +104,190 @@ struct MainWindowView: View {
             // Tab content
             tabContent(for: workspace)
         }
+        .id(workspace.id)
+        .onChange(of: workspace.repositories.count) { _, _ in
+            syncedWorkspaceIds.remove(workspace.id)
+            Task {
+                await syncSelectedWorkspaceIfNeeded()
+            }
+        }
     }
 
     private var tabBar: some View {
-        HStack(spacing: DesignSystem.Spacing.spacing24) {
-            ForEach(WorkspaceTab.allCases) { tab in
-                tabButton(for: tab)
+        HStack(spacing: DesignSystem.Spacing.spacing8) {
+            ViewThatFits(in: .horizontal) {
+                tabButtonGroup(showLabels: true)
+                tabButtonGroup(showLabels: false)
             }
-            Spacer()
+
+            Spacer(minLength: DesignSystem.Spacing.spacing8)
+            appearanceMenu
         }
-        .padding(.horizontal, DesignSystem.Spacing.spacing24)
-        .padding(.vertical, DesignSystem.Spacing.spacing12)
-        .background(DesignSystem.Colors.surface)
+        .padding(.horizontal, DesignSystem.Spacing.spacing20)
+        .padding(.vertical, DesignSystem.Spacing.spacing8)
+        .background(DesignSystem.Colors.navigation)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(DesignSystem.Colors.border)
+                .frame(height: 1)
+        }
     }
 
-    private func tabButton(for tab: WorkspaceTab) -> some View {
+    private func tabButtonGroup(showLabels: Bool) -> some View {
+        HStack(spacing: DesignSystem.Spacing.spacing4) {
+            ForEach(WorkspaceTab.allCases) { tab in
+                tabButton(for: tab, showLabel: showLabels)
+            }
+        }
+    }
+
+    private func tabButton(for tab: WorkspaceTab, showLabel: Bool) -> some View {
         Button {
             withAnimation(DesignSystem.Motion.fast) {
                 selectedTab = tab
             }
         } label: {
-            VStack(spacing: DesignSystem.Spacing.spacing4) {
-                HStack(spacing: DesignSystem.Spacing.spacing4) {
-                    Image(systemName: tab.icon)
-                        .font(.system(size: 12, weight: selectedTab == tab ? .medium : .regular))
+            HStack(spacing: DesignSystem.Spacing.spacing6) {
+                Image(systemName: tab.icon)
+                    .font(.system(size: 12, weight: selectedTab == tab ? .semibold : .regular))
+                if showLabel {
                     Text(tab.rawValue)
                         .font(DesignSystem.Typography.bodyMedium)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                 }
-                .foregroundStyle(
-                    selectedTab == tab
-                        ? DesignSystem.Colors.textPrimary
-                        : DesignSystem.Colors.textSecondary
-                )
-                .padding(.bottom, DesignSystem.Spacing.spacing4)
-
-                // Active indicator
-                Rectangle()
-                    .fill(selectedTab == tab ? DesignSystem.Colors.accent : Color.clear)
-                    .frame(height: 2)
-                    .clipShape(Capsule())
             }
+            .foregroundStyle(selectedTab == tab ? DesignSystem.Colors.navigationActiveText : DesignSystem.Colors.textSecondary)
+            .frame(minWidth: showLabel ? nil : 30)
+            .padding(.horizontal, showLabel ? DesignSystem.Spacing.spacing12 : DesignSystem.Spacing.spacing8)
+            .padding(.vertical, DesignSystem.Spacing.spacing6)
+            .background(selectedTab == tab ? DesignSystem.Colors.navigationActive : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: DesignSystem.Radius.small))
+            .overlay {
+                RoundedRectangle(cornerRadius: DesignSystem.Radius.small)
+                    .stroke(selectedTab == tab ? DesignSystem.Colors.border.opacity(0.65) : Color.clear, lineWidth: 1)
+            }
+            .contentShape(RoundedRectangle(cornerRadius: DesignSystem.Radius.small))
         }
         .buttonStyle(.plain)
+        .help(tab.rawValue)
+    }
+
+    private var appearanceMenu: some View {
+        Menu {
+            ForEach(AppearancePreference.allCases) { preference in
+                Button {
+                    appearancePreference = preference.rawValue
+                } label: {
+                    Label(preference.label, systemImage: preference.icon)
+                }
+            }
+        } label: {
+            Image(systemName: currentAppearance.icon)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(DesignSystem.Colors.textPrimary)
+                .frame(width: 28, height: 28)
+                .background(DesignSystem.Colors.surfaceElevated)
+                .clipShape(RoundedRectangle(cornerRadius: DesignSystem.Radius.small))
+                .overlay {
+                    RoundedRectangle(cornerRadius: DesignSystem.Radius.small)
+                        .stroke(DesignSystem.Colors.border, lineWidth: 1)
+                }
+        }
+        .menuStyle(.borderlessButton)
+        .help("Appearance")
+    }
+
+    private var currentAppearance: AppearancePreference {
+        AppearancePreference(rawValue: appearancePreference) ?? .system
+    }
+
+    @MainActor
+    private func syncSelectedWorkspaceIfNeeded() async {
+        guard let workspace = viewModel.selectedWorkspace,
+              selectedTab == .board || selectedTab == .tickets || selectedTab == .timeline || selectedTab == .sprints || selectedTab == .analytics,
+              !workspace.repositories.isEmpty,
+              !syncedWorkspaceIds.contains(workspace.id),
+              !syncingWorkspaceIds.contains(workspace.id) else {
+            return
+        }
+
+        syncingWorkspaceIds.insert(workspace.id)
+        defer {
+            syncingWorkspaceIds.remove(workspace.id)
+        }
+
+        let client = GitLabAPIClient(
+            baseURL: URL(string: workspace.gitlabInstanceURL) ?? URL(string: AppConstants.defaultGitLabInstanceURL)!,
+            tokenProvider: { try await credentialServices.gitLabOAuthService.getValidToken() }
+        )
+        let planningClient = OpenSpecPMAPIClient(
+            baseURL: URL(string: AppConstants.openSpecPMInstanceURL)!,
+            tokenProvider: { try await credentialServices.gitLabOAuthService.getValidToken() }
+        )
+        let engine = SyncEngine(
+            apiClient: client,
+            planningMetadataProvider: planningClient,
+            modelContext: modelContext
+        )
+
+        await refreshPlanningMetadata(for: workspace, using: engine)
+
+        do {
+            _ = try await engine.fullReconcile(workspace: workspace)
+            syncedWorkspaceIds.insert(workspace.id)
+            workspaceSyncRevision[workspace.id, default: 0] += 1
+            planningSyncError = nil
+        } catch {
+            planningSyncError = "Workspace data could not be refreshed: \(error.localizedDescription)"
+        }
+    }
+
+    @MainActor
+    private func forceRefreshWorkspaceData(for workspace: Workspace) async {
+        syncedWorkspaceIds.remove(workspace.id)
+        await syncSelectedWorkspaceIfNeeded()
+    }
+
+    @MainActor
+    private func refreshPlanningMetadata(for workspace: Workspace, using engine: SyncEngine? = nil) async {
+        guard !isRefreshingPlanningMetadata else { return }
+
+        isRefreshingPlanningMetadata = true
+        defer { isRefreshingPlanningMetadata = false }
+
+        let syncEngine: SyncEngine
+        if let engine {
+            syncEngine = engine
+        } else {
+            let client = GitLabAPIClient(
+                baseURL: URL(string: workspace.gitlabInstanceURL) ?? URL(string: AppConstants.defaultGitLabInstanceURL)!,
+                tokenProvider: { try await credentialServices.gitLabOAuthService.getValidToken() }
+            )
+            let planningClient = OpenSpecPMAPIClient(
+                baseURL: URL(string: AppConstants.openSpecPMInstanceURL)!,
+                tokenProvider: { try await credentialServices.gitLabOAuthService.getValidToken() }
+            )
+            syncEngine = SyncEngine(
+                apiClient: client,
+                planningMetadataProvider: planningClient,
+                modelContext: modelContext
+            )
+        }
+
+        do {
+            try await syncEngine.refreshPlanningMetadata(workspace: workspace)
+            planningSyncError = nil
+            workspaceSyncRevision[workspace.id, default: 0] += 1
+        } catch GitLabOAuthError.tokenExpired {
+            planningSyncError = "GitLab session expired. Reconnect in Settings to load planning dates and story points from OpenSpec PM."
+        } catch GitLabOAuthError.tokenRefreshFailed {
+            planningSyncError = "GitLab session expired. Reconnect in Settings to load planning dates and story points from OpenSpec PM."
+        } catch GitLabOAuthError.tokenNotFound {
+            planningSyncError = "Connect GitLab in Settings to load planning dates and story points from OpenSpec PM."
+        } catch {
+            planningSyncError = "Planning data could not be refreshed: \(error.localizedDescription)"
+        }
     }
 
     @ViewBuilder
@@ -130,19 +295,83 @@ struct MainWindowView: View {
         Group {
             switch selectedTab {
             case .board:
-                placeholderTab(title: "Board", icon: "rectangle.split.3x1", description: "Kanban board for \(workspace.name)")
+                DevLeadConsoleView(
+                    workspace: workspace,
+                    mergeRequests: mergeRequests,
+                    syncRevision: workspaceSyncRevision[workspace.id, default: 0],
+                    planningSyncError: planningSyncError,
+                    isRefreshingPlanningMetadata: isRefreshingPlanningMetadata || syncingWorkspaceIds.contains(workspace.id),
+                    onRefreshPlanningMetadata: {
+                        Task {
+                            await forceRefreshWorkspaceData(for: workspace)
+                        }
+                    }
+                )
+            case .tickets:
+                TicketsView(
+                    workspace: workspace,
+                    syncEngine: SyncEngine(
+                        apiClient: GitLabAPIClient(
+                            baseURL: URL(string: workspace.gitlabInstanceURL) ?? URL(string: AppConstants.defaultGitLabInstanceURL)!,
+                            tokenProvider: { try await credentialServices.gitLabOAuthService.getValidToken() }
+                        ),
+                        planningMetadataProvider: OpenSpecPMAPIClient(
+                            baseURL: URL(string: AppConstants.openSpecPMInstanceURL)!,
+                            tokenProvider: { try await credentialServices.gitLabOAuthService.getValidToken() }
+                        ),
+                        modelContext: modelContext
+                    )
+                )
             case .timeline:
-                placeholderTab(title: "Timeline", icon: "chart.bar.xaxis", description: "Gantt chart for \(workspace.name)")
+                TimelineTabView(
+                    workspace: workspace,
+                    syncRevision: workspaceSyncRevision[workspace.id, default: 0],
+                    planningSyncError: planningSyncError,
+                    isRefreshingPlanningMetadata: isRefreshingPlanningMetadata,
+                    onRefreshPlanningMetadata: {
+                        Task {
+                            await refreshPlanningMetadata(for: workspace)
+                        }
+                    }
+                )
             case .sprints:
-                SprintView(workspace: workspace)
+                SprintView(
+                    workspace: workspace,
+                    gitLabClient: GitLabAPIClient(
+                        baseURL: URL(string: workspace.gitlabInstanceURL) ?? URL(string: AppConstants.defaultGitLabInstanceURL)!,
+                        tokenProvider: { try await credentialServices.gitLabOAuthService.getValidToken() }
+                    ),
+                    modelContext: modelContext
+                )
             case .mergeRequests:
-                MRListView(workspace: workspace)
+                MRListView(
+                    workspace: workspace,
+                    gitLabAPIClient: GitLabAPIClient(
+                        baseURL: URL(string: workspace.gitlabInstanceURL) ?? URL(string: AppConstants.defaultGitLabInstanceURL)!,
+                        tokenProvider: { try await credentialServices.gitLabOAuthService.getValidToken() }
+                    )
+                )
             case .specs:
-                SpecListView(workspace: workspace)
+                SpecListView(
+                    workspace: workspace,
+                    gitLabAPIClient: GitLabAPIClient(
+                        baseURL: URL(string: workspace.gitlabInstanceURL) ?? URL(string: AppConstants.defaultGitLabInstanceURL)!,
+                        tokenProvider: { try await credentialServices.gitLabOAuthService.getValidToken() }
+                    )
+                )
             case .docs:
                 DocumentsView(workspace: workspace)
             case .analytics:
-                AnalyticsView(workspace: workspace)
+                AnalyticsView(
+                    workspace: workspace,
+                    syncRevision: workspaceSyncRevision[workspace.id, default: 0],
+                    isRefreshing: syncingWorkspaceIds.contains(workspace.id),
+                    onRefresh: {
+                        Task {
+                            await forceRefreshWorkspaceData(for: workspace)
+                        }
+                    }
+                )
             case .settings:
                 WorkspaceSettingsView(workspace: workspace)
             }

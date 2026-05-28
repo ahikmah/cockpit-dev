@@ -5,7 +5,7 @@ import XCTest
 ///
 /// These tests create temporary Git repositories to verify clone, pull, push,
 /// commit, and status operations work correctly.
-final class GitOperationsServiceTests: XCTestCase {
+final class GitOperationsServiceTests: CockpitDevTestCase {
 
     private var service: GitOperationsService!
     private var tempDir: URL!
@@ -43,7 +43,7 @@ final class GitOperationsServiceTests: XCTestCase {
 
     func testCloneSuccess() async throws {
         let cloneDestination = tempDir.appendingPathComponent("cloned-repo")
-        var progressUpdates: [CloneProgress] = []
+        let progressUpdates = LockedRecorder<CloneProgress>()
 
         try await service.clone(
             remoteURL: bareRepoURL,
@@ -296,7 +296,7 @@ final class GitOperationsServiceTests: XCTestCase {
             author: GitAuthor(name: "Test", email: "test@example.com")
         )
 
-        var progressUpdates: [TransferProgress] = []
+        let progressUpdates = LockedRecorder<TransferProgress>()
 
         // Push to the bare repo (local, no auth needed)
         try await service.push(
@@ -329,7 +329,7 @@ final class GitOperationsServiceTests: XCTestCase {
         try await runGitCommand(["commit", "-m", "Add pulled file", "--author=Other <other@test.com>"], at: secondClone)
         try await runGitCommand(["push", "origin", "main"], at: secondClone)
 
-        var progressUpdates: [TransferProgress] = []
+        let progressUpdates = LockedRecorder<TransferProgress>()
 
         // Pull in the original working repo
         try await service.pull(

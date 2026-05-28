@@ -2,7 +2,7 @@ import XCTest
 @testable import CockpitDev
 
 /// Tests for the lock screen authentication flow and app lifecycle gating.
-final class LockScreenTests: XCTestCase {
+final class LockScreenTests: CockpitDevTestCase {
 
     private var authService: AuthenticationService!
     private var currentDate: Date!

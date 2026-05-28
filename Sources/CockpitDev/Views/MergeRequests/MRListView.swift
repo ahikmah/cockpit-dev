@@ -8,6 +8,7 @@ import SwiftData
 struct MRListView: View {
 
     let workspace: Workspace
+    let gitLabAPIClient: GitLabAPIClient
     @State private var viewModel = MergeRequestViewModel()
     @Environment(\.modelContext) private var modelContext
 
@@ -88,6 +89,7 @@ struct MRListView: View {
                             MRCardView(mr: mr)
                         }
                         .buttonStyle(.plain)
+                        .contentShape(RoundedRectangle(cornerRadius: DesignSystem.Radius.medium))
                     }
                 }
                 .padding(.horizontal, DesignSystem.Spacing.spacing24)
@@ -163,11 +165,7 @@ struct MRListView: View {
     // MARK: - Helpers
 
     private func configureViewModel() {
-        let apiClient = GitLabAPIClient(
-            baseURL: URL(string: workspace.gitlabInstanceURL)!,
-            tokenProvider: { "" } // Token provider will be injected from OAuth service
-        )
-        viewModel.configure(apiClient: apiClient, modelContext: modelContext, workspace: workspace)
+        viewModel.configure(apiClient: gitLabAPIClient, modelContext: modelContext, workspace: workspace)
     }
 }
 
@@ -242,6 +240,7 @@ struct MRCardView: View {
             RoundedRectangle(cornerRadius: DesignSystem.Radius.medium)
                 .stroke(DesignSystem.Colors.border, lineWidth: 1)
         )
+        .contentShape(RoundedRectangle(cornerRadius: DesignSystem.Radius.medium))
     }
 
     // MARK: - Components

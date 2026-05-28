@@ -166,6 +166,7 @@ struct MRDetailView: View {
                             .frame(height: 2)
                             .clipShape(Capsule())
                     }
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
             }

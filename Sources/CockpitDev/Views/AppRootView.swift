@@ -4,6 +4,7 @@ import SwiftUI
 /// Requires authentication on launch and shows no workspace data until authenticated.
 struct AppRootView: View {
 
+    @Environment(\.credentialServices) private var credentialServices
     @Bindable var authService: AuthenticationService
 
     var body: some View {
@@ -23,6 +24,11 @@ struct AppRootView: View {
             .spring(response: 0.35, dampingFraction: 0.85),
             value: authService.isAuthenticated
         )
+        .task(id: authService.isAuthenticated) {
+            guard authService.isAuthenticated else { return }
+            await credentialServices.gitLabOAuthService.warmCredentialCache()
+        }
+        .activateContainingWindow()
     }
 }
 

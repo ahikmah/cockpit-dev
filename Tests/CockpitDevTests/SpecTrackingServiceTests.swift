@@ -8,12 +8,14 @@ import SwiftData
 /// - Branch deletion handling (marking specs unavailable)
 /// - Content hash computation
 /// - Spec file change detection
-final class SpecTrackingServiceTests: XCTestCase {
+@MainActor
+final class SpecTrackingServiceTests: CockpitDevTestCase {
 
     private var modelContainer: ModelContainer!
     private var modelContext: ModelContext!
     private var specTrackingService: SpecTrackingService!
     private var mockAPIClient: GitLabAPIClient!
+    private var mockServer: MockHTTPServer?
 
     override func setUp() async throws {
         try await super.setUp()
@@ -43,6 +45,8 @@ final class SpecTrackingServiceTests: XCTestCase {
     }
 
     override func tearDown() async throws {
+        try await mockServer?.stop()
+        mockServer = nil
         specTrackingService = nil
         modelContext = nil
         modelContainer = nil
@@ -254,8 +258,8 @@ final class SpecTrackingServiceTests: XCTestCase {
 
     // MARK: - Primary File Name Tests
 
-    func testPrimaryFileName_proposal_returnsRequirementsMd() {
-        XCTAssertEqual(specTrackingService.primaryFileName(for: .proposal), "requirements.md")
+    func testPrimaryFileName_proposal_returnsProposalMd() {
+        XCTAssertEqual(specTrackingService.primaryFileName(for: .proposal), "proposal.md")
     }
 
     func testPrimaryFileName_design_returnsDesignMd() {
@@ -321,6 +325,95 @@ final class SpecTrackingServiceTests: XCTestCase {
         } catch {
             XCTFail("Unexpected error type: \(error)")
         }
+    }
+
+    func testDiscoverSpecsOnBranch_readsOpenSpecDocumentFolder() async throws {
+        let server = MockHTTPServer()
+        mockServer = server
+        let port = try await server.start()
+        let client = GitLabAPIClient(
+            baseURL: URL(string: "http://127.0.0.1:\(port)")!,
+            tokenProvider: { "mock-token" }
+        )
+        specTrackingService = SpecTrackingService(apiClient: client, modelContext: modelContext)
+
+        let rootPath = "openspec/changes"
+        let changePath = "\(rootPath)/cyint84-010-news-detail-dedicated-page"
+        server.handler = { head, _ in
+            let components = URLComponents(string: "http://localhost\(head.uri)")!
+            let path = components.queryItems?.first(where: { $0.name == "path" })?.value
+
+            if head.uri.contains("/repository/tree") {
+                let response: String
+                switch path {
+                case rootPath:
+                    response = """
+                    [{"id":"1","name":"cyint84-010-news-detail-dedicated-page","type":"tree","path":"\(changePath)","mode":"040000"}]
+                    """
+                case changePath:
+                    response = """
+                    [
+                      {"id":"2","name":"proposal.md","type":"blob","path":"\(changePath)/proposal.md","mode":"100644"},
+                      {"id":"3","name":"design.md","type":"blob","path":"\(changePath)/design.md","mode":"100644"},
+                      {"id":"4","name":"tasks.md","type":"blob","path":"\(changePath)/tasks.md","mode":"100644"},
+                      {"id":"5","name":"specs","type":"tree","path":"\(changePath)/specs","mode":"040000"}
+                    ]
+                    """
+                case "\(changePath)/specs":
+                    response = """
+                    [{"id":"6","name":"adjacent-articles-api","type":"tree","path":"\(changePath)/specs/adjacent-articles-api","mode":"040000"}]
+                    """
+                case "\(changePath)/specs/adjacent-articles-api":
+                    response = """
+                    [{"id":"7","name":"spec.md","type":"blob","path":"\(changePath)/specs/adjacent-articles-api/spec.md","mode":"100644"}]
+                    """
+                default:
+                    response = "[]"
+                }
+                return (200, [], Data(response.utf8))
+            }
+
+            if head.uri.contains("/repository/files/") {
+                let content: String
+                if head.uri.contains("proposal.md") {
+                    content = "# Proposal"
+                } else if head.uri.contains("design.md") {
+                    content = "# Design"
+                } else if head.uri.contains("tasks.md") {
+                    content = "- [ ] Implement"
+                } else {
+                    content = "# Adjacent Articles API"
+                }
+                let base64 = Data(content.utf8).base64EncodedString()
+                return (200, [], Data("{\"content\":\"\(base64)\",\"encoding\":\"base64\"}".utf8))
+            }
+
+            if head.uri.contains("/repository/commits") {
+                return (200, [], Data("[]".utf8))
+            }
+
+            return (404, [], Data("{}".utf8))
+        }
+
+        let workspace = Workspace(name: "Test", specDirectoryPath: rootPath)
+        let repository = Repository(gitlabProjectId: 42, name: "cyint", url: "https://gitlab.example.com/cyint")
+        repository.workspace = workspace
+        workspace.repositories = [repository]
+        modelContext.insert(workspace)
+        modelContext.insert(repository)
+
+        try await specTrackingService.discoverSpecsOnBranch(branchName: "orbit-dev-84", workspace: workspace)
+
+        let entry = try XCTUnwrap(workspace.specs.first)
+        XCTAssertEqual(entry.phase, .tasks)
+        let version = try XCTUnwrap(entry.versions.first)
+        let snapshot = OpenSpecDocumentSnapshot.decode(version.content, legacyPhase: entry.phase)
+        XCTAssertEqual(snapshot.proposal, "# Proposal")
+        XCTAssertEqual(snapshot.design, "# Design")
+        XCTAssertEqual(snapshot.tasks, "- [ ] Implement")
+        XCTAssertEqual(snapshot.specs, [
+            .init(path: "specs/adjacent-articles-api/spec.md", content: "# Adjacent Articles API")
+        ])
     }
 
     // MARK: - Helpers

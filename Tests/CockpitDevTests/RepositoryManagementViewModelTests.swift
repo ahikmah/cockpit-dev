@@ -3,7 +3,7 @@ import SwiftData
 @testable import CockpitDev
 
 @MainActor
-final class RepositoryManagementViewModelTests: XCTestCase {
+final class RepositoryManagementViewModelTests: CockpitDevTestCase {
 
     private var viewModel: RepositoryManagementViewModel!
     private var modelContainer: ModelContainer!
@@ -48,6 +48,13 @@ final class RepositoryManagementViewModelTests: XCTestCase {
         XCTAssertNil(viewModel.errorMessage)
         XCTAssertFalse(viewModel.showError)
         XCTAssertFalse(viewModel.isValidating)
+    }
+
+    func testWorkspaceLocalRootPath_isPersistedForRepositoryPlacement() throws {
+        workspace.localRootPath = "/tmp/Test-Workspace"
+        try modelContext.save()
+
+        XCTAssertEqual(workspace.localRootPath, "/tmp/Test-Workspace")
     }
 
     // MARK: - URL Validation Tests
@@ -98,6 +105,63 @@ final class RepositoryManagementViewModelTests: XCTestCase {
         XCTAssertFalse(success)
         XCTAssertTrue(viewModel.showError)
         XCTAssertTrue(viewModel.errorMessage?.contains("GitLab API client") ?? false)
+    }
+
+    func testAddRepository_clonesIntoWorkspaceRootBeforeSaving() async throws {
+        let server = MockHTTPServer()
+        let port = try await server.start()
+        defer {
+            Task { try? await server.stop() }
+        }
+
+        server.handler = { _, _ in
+            let project = """
+            {
+              "id": 42,
+              "name": "cyint",
+              "name_with_namespace": "devbuddy / cyint",
+              "path": "cyint",
+              "path_with_namespace": "devbuddy/cyint",
+              "default_branch": "main",
+              "http_url_to_repo": "https://gitlab.example/devbuddy/cyint.git",
+              "ssh_url_to_repo": "git@gitlab.example:devbuddy/cyint.git",
+              "web_url": "https://gitlab.example/devbuddy/cyint",
+              "visibility": "private"
+            }
+            """
+            return (200, [], Data(project.utf8))
+        }
+
+        let rootDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CockpitDev-WorkspaceRoot-\(UUID().uuidString)", isDirectory: true)
+        workspace.localRootPath = rootDirectory.path
+
+        var clonedBaseDirectory: URL?
+        let autoCloneViewModel = RepositoryManagementViewModel(
+            repositoryCloneHandler: { repository, baseDirectory, _ in
+                clonedBaseDirectory = baseDirectory
+                let checkout = baseDirectory.appendingPathComponent(repository.name, isDirectory: true)
+                repository.localPath = checkout.path
+                return .success(checkout)
+            }
+        )
+        autoCloneViewModel.configure(
+            workspace: workspace,
+            modelContext: modelContext,
+            gitLabAPIClient: GitLabAPIClient(
+                baseURL: URL(string: "http://127.0.0.1:\(port)")!,
+                tokenProvider: { "api-token" }
+            ),
+            cloneTokenProvider: { "clone-token" }
+        )
+        autoCloneViewModel.newRepositoryURL = "https://gitlab.example/devbuddy/cyint"
+
+        let success = await autoCloneViewModel.addRepository()
+
+        XCTAssertTrue(success)
+        XCTAssertEqual(clonedBaseDirectory?.standardizedFileURL.path, rootDirectory.standardizedFileURL.path)
+        XCTAssertEqual(workspace.repositories.first?.localPath, rootDirectory.appendingPathComponent("cyint").path)
+        XCTAssertEqual(workspace.repositories.first?.url, "https://gitlab.example/devbuddy/cyint.git")
     }
 
     // MARK: - Duplicate Detection Tests
@@ -292,6 +356,48 @@ final class RepositoryManagementViewModelTests: XCTestCase {
 
         XCTAssertEqual(availability.count, 1)
         XCTAssertTrue(availability[0].1)
+    }
+
+    func testOpenInIDE_clonesRemoteOnlyReposIntoWorkspaceRootAndLaunchesZed() async throws {
+        let rootDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("CockpitDev-OpenRoot-\(UUID().uuidString)", isDirectory: true)
+        workspace.localRootPath = rootDirectory.path
+
+        let repo = Repository(
+            gitlabProjectId: 123,
+            name: "cyint",
+            url: "https://gitlab.example/devbuddy/cyint.git"
+        )
+        repo.workspace = workspace
+        workspace.repositories.append(repo)
+        modelContext.insert(repo)
+
+        var launchedDirectory: URL?
+        let service = IDEContextService(
+            zedLauncher: { directory in
+                launchedDirectory = directory
+                return true
+            }
+        )
+        let openingViewModel = RepositoryManagementViewModel(
+            ideContextService: service,
+            repositoryCloneHandler: { repository, baseDirectory, _ in
+                let checkout = baseDirectory.appendingPathComponent(repository.name, isDirectory: true)
+                try? FileManager.default.createDirectory(at: checkout, withIntermediateDirectories: true)
+                repository.localPath = checkout.path
+                return .success(checkout)
+            }
+        )
+        openingViewModel.configure(
+            workspace: workspace,
+            modelContext: modelContext,
+            cloneTokenProvider: { "clone-token" }
+        )
+
+        await openingViewModel.openInIDE()
+
+        XCTAssertEqual(repo.localPath, rootDirectory.appendingPathComponent("cyint").path)
+        XCTAssertEqual(launchedDirectory?.standardizedFileURL.path, rootDirectory.standardizedFileURL.path)
     }
 
     // MARK: - Reset Form Tests

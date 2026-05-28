@@ -12,6 +12,7 @@ struct RepositoriesSettingsView: View {
 
     let workspace: Workspace
     var gitLabAPIClient: GitLabAPIClient?
+    var cloneTokenProvider: (() async throws -> String)?
 
     var body: some View {
         VStack(alignment: .leading, spacing: DesignSystem.Spacing.spacing24) {
@@ -25,7 +26,8 @@ struct RepositoriesSettingsView: View {
             viewModel.configure(
                 workspace: workspace,
                 modelContext: modelContext,
-                gitLabAPIClient: gitLabAPIClient
+                gitLabAPIClient: gitLabAPIClient,
+                cloneTokenProvider: cloneTokenProvider
             )
         }
         .sheet(isPresented: $viewModel.showAddSheet) {
@@ -61,23 +63,51 @@ struct RepositoriesSettingsView: View {
     // MARK: - Header
 
     private var headerSection: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: DesignSystem.Spacing.spacing4) {
-                Text("Repositories")
-                    .font(DesignSystem.Typography.headingMedium)
-                    .foregroundStyle(DesignSystem.Colors.textPrimary)
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .top, spacing: DesignSystem.Spacing.spacing16) {
+                headerCopy
+                    .layoutPriority(1)
 
-                Text("Manage GitLab repositories associated with this workspace.")
-                    .font(DesignSystem.Typography.bodyRegular)
+                Spacer(minLength: DesignSystem.Spacing.spacing16)
+                headerActions
+            }
+
+            VStack(alignment: .leading, spacing: DesignSystem.Spacing.spacing12) {
+                headerCopy
+                headerActions
+            }
+        }
+    }
+
+    private var headerCopy: some View {
+        VStack(alignment: .leading, spacing: DesignSystem.Spacing.spacing4) {
+            Text("Repositories")
+                .font(DesignSystem.Typography.headingMedium)
+                .foregroundStyle(DesignSystem.Colors.textPrimary)
+                .lineLimit(1)
+
+            Text("Manage GitLab repositories associated with this workspace.")
+                .font(DesignSystem.Typography.bodyRegular)
+                .foregroundStyle(DesignSystem.Colors.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: DesignSystem.Spacing.spacing6) {
+                Image(systemName: "folder")
+                    .foregroundStyle(DesignSystem.Colors.accent)
+
+                Text(workspace.localRootPath ?? "Local root is assigned on the first clone")
+                    .font(DesignSystem.Typography.caption)
                     .foregroundStyle(DesignSystem.Colors.textSecondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
             }
+        }
+    }
 
-            Spacer()
-
-            HStack(spacing: DesignSystem.Spacing.spacing8) {
-                openInIDEButton
-                addRepositoryButton
-            }
+    private var headerActions: some View {
+        HStack(spacing: DesignSystem.Spacing.spacing8) {
+            openInIDEButton
+            addRepositoryButton
         }
     }
 
@@ -91,6 +121,8 @@ struct RepositoriesSettingsView: View {
                     .font(.system(size: 12, weight: .medium))
                 Text("Add Repository")
                     .font(DesignSystem.Typography.bodyMedium)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
             }
             .foregroundStyle(.white)
             .padding(.horizontal, DesignSystem.Spacing.spacing12)
@@ -112,6 +144,8 @@ struct RepositoriesSettingsView: View {
                     .font(.system(size: 12, weight: .medium))
                 Text("Open in IDE")
                     .font(DesignSystem.Typography.bodyMedium)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
             }
             .foregroundStyle(DesignSystem.Colors.accent)
             .padding(.horizontal, DesignSystem.Spacing.spacing12)
@@ -120,12 +154,8 @@ struct RepositoriesSettingsView: View {
             .clipShape(RoundedRectangle(cornerRadius: DesignSystem.Radius.small))
         }
         .buttonStyle(.plain)
-        .disabled(viewModel.repositories.isEmpty || !hasLocalRepos)
-        .opacity(viewModel.repositories.isEmpty || !hasLocalRepos ? 0.5 : 1.0)
-    }
-
-    private var hasLocalRepos: Bool {
-        viewModel.repositories.contains { $0.localPath != nil }
+        .disabled(viewModel.repositories.isEmpty)
+        .opacity(viewModel.repositories.isEmpty ? 0.5 : 1.0)
     }
 
     // MARK: - Repository List
@@ -258,9 +288,10 @@ struct RepositoryRowView: View {
                     .font(.system(size: 10))
                     .foregroundStyle(DesignSystem.Colors.textTertiary)
 
-                Text("Not cloned locally")
+                Text("Remote added; choose a local folder to open in IDE")
                     .font(DesignSystem.Typography.caption)
                     .foregroundStyle(DesignSystem.Colors.textTertiary)
+                    .lineLimit(1)
             }
         }
     }
@@ -307,6 +338,7 @@ struct AddRepositorySheet: View {
 
     @Bindable var viewModel: RepositoryManagementViewModel
     @Environment(\.dismiss) private var dismiss
+    @FocusState private var isRepositoryURLFocused: Bool
 
     var body: some View {
         VStack(spacing: DesignSystem.Spacing.spacing24) {
@@ -316,7 +348,7 @@ struct AddRepositorySheet: View {
                     .font(DesignSystem.Typography.headingMedium)
                     .foregroundStyle(DesignSystem.Colors.textPrimary)
 
-                Text("Enter a GitLab repository URL to validate and associate with this workspace.")
+                Text("Enter a GitLab repository URL. The repository will be cloned into this workspace's local root.")
                     .font(DesignSystem.Typography.bodyRegular)
                     .foregroundStyle(DesignSystem.Colors.textSecondary)
                     .multilineTextAlignment(.center)
@@ -329,15 +361,9 @@ struct AddRepositorySheet: View {
                     .foregroundStyle(DesignSystem.Colors.textSecondary)
 
                 TextField("https://gitlab.com/namespace/project.git", text: $viewModel.newRepositoryURL)
-                    .textFieldStyle(.plain)
+                    .textFieldStyle(.roundedBorder)
                     .font(DesignSystem.Typography.bodyRegular)
-                    .padding(DesignSystem.Spacing.spacing8)
-                    .background(DesignSystem.Colors.surface)
-                    .clipShape(RoundedRectangle(cornerRadius: DesignSystem.Radius.medium))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: DesignSystem.Radius.medium)
-                            .stroke(DesignSystem.Colors.border, lineWidth: 1)
-                    )
+                    .focused($isRepositoryURLFocused)
 
                 Text("Supports HTTPS and SSH URLs (e.g., git@gitlab.com:namespace/project.git)")
                     .font(DesignSystem.Typography.caption)
@@ -386,7 +412,7 @@ struct AddRepositorySheet: View {
                             ProgressView()
                                 .controlSize(.small)
                         }
-                        Text(viewModel.isValidating ? "Validating..." : "Add Repository")
+                        Text(viewModel.isValidating ? "Cloning..." : "Add & Clone")
                             .font(DesignSystem.Typography.bodyMedium)
                     }
                     .foregroundStyle(.white)
@@ -405,6 +431,12 @@ struct AddRepositorySheet: View {
         }
         .padding(DesignSystem.Spacing.spacing24)
         .frame(width: 480)
+        .activateContainingWindow()
+        .onAppear {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                isRepositoryURLFocused = true
+            }
+        }
     }
 }
 

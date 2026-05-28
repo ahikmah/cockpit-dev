@@ -12,7 +12,7 @@ enum IDEContextError: Error, LocalizedError {
     case workspaceFileGenerationFailed(String)
     case launchFailed(String)
     case repositoryNotCloned(String)
-    case allClonesFailed([(Repository, Error)])
+    case allClonesFailed([String])
 
     var errorDescription: String? {
         switch self {
@@ -25,7 +25,7 @@ enum IDEContextError: Error, LocalizedError {
         case .repositoryNotCloned(let name):
             return "Repository '\(name)' is not cloned locally."
         case .allClonesFailed(let failures):
-            let names = failures.map { $0.0.name }.joined(separator: ", ")
+            let names = failures.joined(separator: ", ")
             return "All repository clones failed: \(names)"
         }
     }
@@ -72,6 +72,12 @@ struct CloneOperationResult: Sendable {
     }
 }
 
+/// Sendable repository identity used by clone progress callbacks.
+struct RepositoryProgressContext: Sendable {
+    let id: UUID
+    let name: String
+}
+
 // MARK: - IDE Context Service
 
 /// Service responsible for generating VS Code multi-root workspace files
@@ -92,6 +98,7 @@ class IDEContextService {
 
     private let gitOperationsService: GitOperationsService
     private let fileManager: FileManager
+    private let zedLauncher: (URL) -> Bool
 
     // MARK: - Initialization
 
@@ -101,10 +108,38 @@ class IDEContextService {
     ///   - fileManager: The file manager for path existence checks (default: .default).
     init(
         gitOperationsService: GitOperationsService = GitOperationsService(),
-        fileManager: FileManager = .default
+        fileManager: FileManager = .default,
+        zedLauncher: ((URL) -> Bool)? = nil
     ) {
         self.gitOperationsService = gitOperationsService
         self.fileManager = fileManager
+        self.zedLauncher = zedLauncher ?? Self.openDirectoryInZed
+    }
+
+    // MARK: - Workspace Local Root
+
+    /// Returns the shared local folder that contains all repositories in a workspace.
+    func localRootDirectory(for workspace: Workspace) -> URL {
+        if let configuredRoot = workspace.localRootPath, !configuredRoot.isEmpty {
+            return URL(fileURLWithPath: configuredRoot, isDirectory: true)
+        }
+
+        if let existingPath = workspace.repositories.compactMap(\.localPath).first {
+            let inferredRoot = URL(fileURLWithPath: existingPath, isDirectory: true)
+                .deletingLastPathComponent()
+            workspace.localRootPath = inferredRoot.path
+            return inferredRoot
+        }
+
+        let sanitizedName = workspace.name
+            .replacingOccurrences(of: " ", with: "-")
+            .replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: "\\", with: "-")
+        let root = fileManager.homeDirectoryForCurrentUser
+            .appendingPathComponent("Developer/CockpitDev", isDirectory: true)
+            .appendingPathComponent(sanitizedName, isDirectory: true)
+        workspace.localRootPath = root.path
+        return root
     }
 
     // MARK: - Generate Workspace File
@@ -178,12 +213,12 @@ class IDEContextService {
 
     // MARK: - Open in IDE
 
-    /// Opens all workspace repositories in the IDE via a .code-workspace file.
+    /// Opens the shared local workspace directory in Zed.
     ///
     /// This method:
     /// 1. Checks that the workspace has repositories (zero-repos guard)
-    /// 2. Generates the .code-workspace file with available repo paths
-    /// 3. Launches the file using NSWorkspace (system default app for .code-workspace)
+    /// 2. Resolves the shared local root directory
+    /// 3. Launches that folder using Zed
     ///
     /// - Parameter workspace: The workspace to open.
     /// - Throws: `IDEContextError.noRepositories` if no repos are available,
@@ -194,13 +229,21 @@ class IDEContextService {
             throw IDEContextError.noRepositories
         }
 
-        let fileURL = try generateWorkspaceFile(workspace: workspace)
+        let hasAvailableRepository = workspace.repositories.contains { repository in
+            guard let localPath = repository.localPath else { return false }
+            return fileManager.fileExists(atPath: localPath)
+        }
+        guard hasAvailableRepository else {
+            throw IDEContextError.noRepositories
+        }
+
+        let rootURL = localRootDirectory(for: workspace)
 
         #if os(macOS)
-        let opened = NSWorkspace.shared.open(fileURL)
+        let opened = zedLauncher(rootURL)
         if !opened {
             throw IDEContextError.launchFailed(
-                "System could not open .code-workspace file. Ensure VS Code or a compatible editor is installed and set as the default application for .code-workspace files."
+                "Could not open the workspace in Zed. Ensure Zed is installed in Applications."
             )
         }
         #endif
@@ -278,12 +321,13 @@ class IDEContextService {
         repos: [Repository],
         baseDirectory: URL,
         credentials: GitCredentials,
-        progressHandler: (@Sendable (Repository, CloneProgress) -> Void)? = nil
+        progressHandler: (@Sendable (RepositoryProgressContext, CloneProgress) -> Void)? = nil
     ) async -> [CloneOperationResult] {
         var results: [CloneOperationResult] = []
 
         for repo in repos {
             let repoDir = baseDirectory.appendingPathComponent(repo.name)
+            let progressContext = RepositoryProgressContext(id: repo.id, name: repo.name)
 
             do {
                 // Ensure base directory exists
@@ -303,9 +347,8 @@ class IDEContextService {
                     remoteURL: remoteURL,
                     localPath: repoDir,
                     credentials: credentials,
-                    progressHandler: { [weak self] progress in
-                        _ = self // capture to keep alive
-                        progressHandler?(repo, progress)
+                    progressHandler: { progress in
+                        progressHandler?(progressContext, progress)
                     }
                 )
 
@@ -365,9 +408,9 @@ class IDEContextService {
         }
 
         if allFailed && !mapped.isEmpty {
-            let failures = mapped.compactMap { repo, result -> (Repository, Error)? in
+            let failures = mapped.compactMap { repo, result -> String? in
                 if case .failure(let error) = result {
-                    return (repo, error)
+                    return "\(repo.name) (\(error.localizedDescription))"
                 }
                 return nil
             }
@@ -400,7 +443,7 @@ class IDEContextService {
         baseDirectory: URL,
         credentials: GitCredentials,
         shouldCloneMissing: Bool = true,
-        progressHandler: (@Sendable (Repository, CloneProgress) -> Void)? = nil
+        progressHandler: (@Sendable (RepositoryProgressContext, CloneProgress) -> Void)? = nil
     ) async throws -> [CloneOperationResult] {
         // Zero-repos guard
         guard !workspace.repositories.isEmpty else {
@@ -429,4 +472,24 @@ class IDEContextService {
 
         return cloneResults
     }
+
+    #if os(macOS)
+    private static func openDirectoryInZed(_ directory: URL) -> Bool {
+        let workspace = NSWorkspace.shared
+        let zedURL = workspace.urlForApplication(withBundleIdentifier: "dev.zed.Zed")
+            ?? URL(fileURLWithPath: "/Applications/Zed.app", isDirectory: true)
+
+        guard FileManager.default.fileExists(atPath: zedURL.path) else {
+            return false
+        }
+
+        let configuration = NSWorkspace.OpenConfiguration()
+        workspace.open(
+            [directory],
+            withApplicationAt: zedURL,
+            configuration: configuration
+        )
+        return true
+    }
+    #endif
 }

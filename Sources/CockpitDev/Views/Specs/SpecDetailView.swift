@@ -10,9 +10,23 @@ struct SpecDetailView: View {
 
     let spec: OpenSpecEntry
     let viewModel: SpecViewModel
+    let isFocusMode: Bool
+    let onToggleFocus: () -> Void
 
-    @Environment(\.dismiss) private var dismiss
     @State private var showingVersionHistory: Bool = false
+    @State private var selectedTab: SpecDocumentTab = .proposal
+
+    init(
+        spec: OpenSpecEntry,
+        viewModel: SpecViewModel,
+        isFocusMode: Bool = false,
+        onToggleFocus: @escaping () -> Void = {}
+    ) {
+        self.spec = spec
+        self.viewModel = viewModel
+        self.isFocusMode = isFocusMode
+        self.onToggleFocus = onToggleFocus
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -22,16 +36,17 @@ struct SpecDetailView: View {
             Divider()
 
             // Content
-            if let content = viewModel.latestContent(for: spec) {
-                markdownContentView(content: content)
+            if let snapshot = viewModel.latestSnapshot(for: spec) {
+                documentContent(snapshot: snapshot)
             } else {
                 noContentView
             }
         }
-        .frame(minWidth: 600, minHeight: 500)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(DesignSystem.Colors.background)
         .onAppear {
             viewModel.markAsRead(spec)
+            selectInitialTab()
         }
         .sheet(isPresented: $showingVersionHistory) {
             VersionHistoryView(spec: spec, viewModel: viewModel)
@@ -41,8 +56,25 @@ struct SpecDetailView: View {
     // MARK: - Header
 
     private var detailHeader: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: DesignSystem.Spacing.spacing12) {
+                detailIdentity
+                Spacer(minLength: DesignSystem.Spacing.spacing12)
+                detailActions
+            }
+
+            VStack(alignment: .leading, spacing: DesignSystem.Spacing.spacing12) {
+                detailIdentity
+                detailActions
+            }
+        }
+        .padding(.horizontal, DesignSystem.Spacing.spacing24)
+        .padding(.vertical, DesignSystem.Spacing.spacing16)
+        .background(DesignSystem.Colors.surface)
+    }
+
+    private var detailIdentity: some View {
         HStack(spacing: DesignSystem.Spacing.spacing12) {
-            // Phase icon
             Image(systemName: SpecViewModel.phaseIcon(for: spec.phase))
                 .font(.system(size: 18, weight: .medium))
                 .foregroundStyle(phaseColor)
@@ -54,6 +86,7 @@ struct SpecDetailView: View {
                 Text(spec.specName)
                     .font(DesignSystem.Typography.headingMedium)
                     .foregroundStyle(DesignSystem.Colors.textPrimary)
+                    .lineLimit(1)
 
                 HStack(spacing: DesignSystem.Spacing.spacing12) {
                     // Branch
@@ -61,6 +94,7 @@ struct SpecDetailView: View {
                         Image(systemName: "arrow.triangle.branch")
                             .font(.system(size: 11))
                         Text(spec.branchName)
+                            .lineLimit(1)
                     }
                     .font(DesignSystem.Typography.caption)
                     .foregroundStyle(DesignSystem.Colors.textSecondary)
@@ -97,10 +131,11 @@ struct SpecDetailView: View {
                     }
                 }
             }
+        }
+    }
 
-            Spacer()
-
-            // Version history button
+    private var detailActions: some View {
+        HStack(spacing: DesignSystem.Spacing.spacing8) {
             if !spec.versions.isEmpty {
                 Button {
                     showingVersionHistory = true
@@ -120,28 +155,104 @@ struct SpecDetailView: View {
                 .buttonStyle(.plain)
             }
 
-            Button {
-                dismiss()
-            } label: {
-                Image(systemName: "xmark")
-                    .font(.system(size: 12, weight: .bold))
-                    .foregroundStyle(DesignSystem.Colors.textSecondary)
-                    .frame(width: 28, height: 28)
-                    .background(DesignSystem.Colors.surface)
-                    .clipShape(Circle())
-                    .overlay(
-                        Circle()
-                            .stroke(DesignSystem.Colors.border, lineWidth: 1)
-                    )
+            Button(action: onToggleFocus) {
+                Label(
+                    isFocusMode ? "Show Queue" : "Focus",
+                    systemImage: isFocusMode ? "sidebar.left" : "arrow.up.left.and.arrow.down.right"
+                )
+                .font(DesignSystem.Typography.bodyMedium)
+                .foregroundStyle(DesignSystem.Colors.textSecondary)
+                .padding(.horizontal, DesignSystem.Spacing.spacing12)
+                .padding(.vertical, DesignSystem.Spacing.spacing6)
+                .background(DesignSystem.Colors.surfaceElevated)
+                .clipShape(RoundedRectangle(cornerRadius: DesignSystem.Radius.small))
+                .overlay {
+                    RoundedRectangle(cornerRadius: DesignSystem.Radius.small)
+                        .stroke(DesignSystem.Colors.border, lineWidth: 1)
+                }
             }
             .buttonStyle(.plain)
+            .help(isFocusMode ? "Show review queue" : "Read without the queue")
         }
-        .padding(.horizontal, DesignSystem.Spacing.spacing24)
-        .padding(.vertical, DesignSystem.Spacing.spacing16)
-        .background(DesignSystem.Colors.surface)
     }
 
     // MARK: - Markdown Content
+
+    private func documentContent(snapshot: OpenSpecDocumentSnapshot) -> some View {
+        VStack(spacing: 0) {
+            HStack {
+                Picker("Document", selection: $selectedTab) {
+                    ForEach(SpecDocumentTab.allCases) { tab in
+                        Label(tab.title, systemImage: tab.icon)
+                            .labelStyle(.titleOnly)
+                            .tag(tab)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(maxWidth: 360)
+
+                Spacer()
+            }
+            .padding(.horizontal, DesignSystem.Spacing.spacing24)
+            .padding(.vertical, DesignSystem.Spacing.spacing12)
+            .background(DesignSystem.Colors.surface)
+
+            Divider()
+
+            switch selectedTab {
+            case .proposal:
+                tabMarkdownContent(snapshot.proposal, emptyMessage: "No proposal document found.")
+            case .design:
+                tabMarkdownContent(snapshot.design, emptyMessage: "No design document found.")
+            case .tasks:
+                tabMarkdownContent(snapshot.tasks, emptyMessage: "No tasks document found.")
+            case .specs:
+                capabilitySpecsContent(snapshot.specs)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func tabMarkdownContent(_ content: String?, emptyMessage: String) -> some View {
+        if let content {
+            markdownContentView(content: content)
+        } else {
+            emptyDocumentView(message: emptyMessage)
+        }
+    }
+
+    private func capabilitySpecsContent(_ documents: [OpenSpecDocumentSnapshot.SpecDocument]) -> some View {
+        ScrollView {
+            if documents.isEmpty {
+                emptyDocumentView(message: "No capability spec documents found.")
+                    .frame(minHeight: 280)
+            } else {
+                VStack(alignment: .leading, spacing: DesignSystem.Spacing.spacing16) {
+                    ForEach(documents) { document in
+                        VStack(alignment: .leading, spacing: DesignSystem.Spacing.spacing12) {
+                            Label(document.path, systemImage: "doc.text")
+                                .font(DesignSystem.Typography.monospace)
+                                .foregroundStyle(DesignSystem.Colors.textSecondary)
+
+                            MarkdownRendererView(content: document.content)
+                        }
+                        .padding(DesignSystem.Spacing.spacing16)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(DesignSystem.Colors.surface)
+                        .clipShape(RoundedRectangle(cornerRadius: DesignSystem.Radius.small))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: DesignSystem.Radius.small)
+                                .stroke(DesignSystem.Colors.border, lineWidth: 1)
+                        }
+                    }
+                }
+                .padding(DesignSystem.Spacing.spacing24)
+                .frame(maxWidth: 880, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
 
     private func markdownContentView(content: String) -> some View {
         ScrollView {
@@ -171,10 +282,25 @@ struct SpecDetailView: View {
                 MarkdownRendererView(content: content)
             }
             .padding(DesignSystem.Spacing.spacing24)
+            .frame(maxWidth: 880, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
     // MARK: - No Content
+
+    private func emptyDocumentView(message: String) -> some View {
+        VStack(spacing: DesignSystem.Spacing.spacing12) {
+            Image(systemName: "doc.text")
+                .font(.system(size: 28, weight: .light))
+                .foregroundStyle(DesignSystem.Colors.textTertiary)
+
+            Text(message)
+                .font(DesignSystem.Typography.bodyRegular)
+                .foregroundStyle(DesignSystem.Colors.textSecondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
 
     private var noContentView: some View {
         VStack(spacing: DesignSystem.Spacing.spacing12) {
@@ -211,159 +337,53 @@ struct SpecDetailView: View {
         case .proposal:
             return DesignSystem.Colors.accentSoft
         case .design:
-            return Color(red: 1.0, green: 0.96, blue: 0.89)
+            return DesignSystem.Colors.warningSoft
         case .tasks:
-            return Color(red: 0.89, green: 0.98, blue: 0.93)
+            return DesignSystem.Colors.successSoft
+        }
+    }
+
+    private func selectInitialTab() {
+        guard let snapshot = viewModel.latestSnapshot(for: spec) else {
+            return
+        }
+
+        if snapshot.proposal != nil {
+            selectedTab = .proposal
+        } else if snapshot.design != nil {
+            selectedTab = .design
+        } else if snapshot.tasks != nil {
+            selectedTab = .tasks
+        } else {
+            selectedTab = .specs
         }
     }
 }
 
-// MARK: - Markdown Renderer View
+private enum SpecDocumentTab: String, CaseIterable, Identifiable {
+    case proposal
+    case design
+    case tasks
+    case specs
 
-/// A simple markdown renderer that displays formatted markdown content.
-///
-/// Renders headings, code blocks, lists, bold, italic, and links
-/// using native SwiftUI text styling.
-struct MarkdownRendererView: View {
+    var id: String { rawValue }
 
-    let content: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: DesignSystem.Spacing.spacing8) {
-            ForEach(Array(parseLines().enumerated()), id: \.offset) { _, line in
-                renderLine(line)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
+    var title: String {
+        rawValue.capitalized
     }
 
-    // MARK: - Line Parsing
-
-    private func parseLines() -> [MarkdownLine] {
-        let lines = content.components(separatedBy: "\n")
-        var result: [MarkdownLine] = []
-        var inCodeBlock = false
-        var codeBlockContent: [String] = []
-
-        for line in lines {
-            if line.hasPrefix("```") {
-                if inCodeBlock {
-                    // End code block
-                    result.append(.codeBlock(codeBlockContent.joined(separator: "\n")))
-                    codeBlockContent = []
-                    inCodeBlock = false
-                } else {
-                    // Start code block
-                    inCodeBlock = true
-                }
-            } else if inCodeBlock {
-                codeBlockContent.append(line)
-            } else if line.hasPrefix("# ") {
-                result.append(.heading1(String(line.dropFirst(2))))
-            } else if line.hasPrefix("## ") {
-                result.append(.heading2(String(line.dropFirst(3))))
-            } else if line.hasPrefix("### ") {
-                result.append(.heading3(String(line.dropFirst(4))))
-            } else if line.hasPrefix("- ") || line.hasPrefix("* ") {
-                result.append(.listItem(String(line.dropFirst(2))))
-            } else if line.trimmingCharacters(in: .whitespaces).isEmpty {
-                result.append(.empty)
-            } else {
-                result.append(.paragraph(line))
-            }
-        }
-
-        // Handle unclosed code block
-        if inCodeBlock && !codeBlockContent.isEmpty {
-            result.append(.codeBlock(codeBlockContent.joined(separator: "\n")))
-        }
-
-        return result
-    }
-
-    // MARK: - Line Rendering
-
-    @ViewBuilder
-    private func renderLine(_ line: MarkdownLine) -> some View {
-        switch line {
-        case .heading1(let text):
-            Text(text)
-                .font(DesignSystem.Typography.headingLarge)
-                .foregroundStyle(DesignSystem.Colors.textPrimary)
-                .padding(.top, DesignSystem.Spacing.spacing8)
-
-        case .heading2(let text):
-            Text(text)
-                .font(DesignSystem.Typography.headingMedium)
-                .foregroundStyle(DesignSystem.Colors.textPrimary)
-                .padding(.top, DesignSystem.Spacing.spacing6)
-
-        case .heading3(let text):
-            Text(text)
-                .font(DesignSystem.Typography.headingSmall)
-                .foregroundStyle(DesignSystem.Colors.textPrimary)
-                .padding(.top, DesignSystem.Spacing.spacing4)
-
-        case .paragraph(let text):
-            Text(renderInlineMarkdown(text))
-                .font(DesignSystem.Typography.bodyRegular)
-                .foregroundStyle(DesignSystem.Colors.textPrimary)
-                .fixedSize(horizontal: false, vertical: true)
-
-        case .listItem(let text):
-            HStack(alignment: .top, spacing: DesignSystem.Spacing.spacing8) {
-                Text("•")
-                    .font(DesignSystem.Typography.bodyRegular)
-                    .foregroundStyle(DesignSystem.Colors.textSecondary)
-                Text(renderInlineMarkdown(text))
-                    .font(DesignSystem.Typography.bodyRegular)
-                    .foregroundStyle(DesignSystem.Colors.textPrimary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            .padding(.leading, DesignSystem.Spacing.spacing12)
-
-        case .codeBlock(let code):
-            ScrollView(.horizontal, showsIndicators: false) {
-                Text(code)
-                    .font(DesignSystem.Typography.monospace)
-                    .foregroundStyle(DesignSystem.Colors.textPrimary)
-                    .padding(DesignSystem.Spacing.spacing12)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(DesignSystem.Colors.background)
-            .clipShape(RoundedRectangle(cornerRadius: DesignSystem.Radius.small))
-            .overlay(
-                RoundedRectangle(cornerRadius: DesignSystem.Radius.small)
-                    .stroke(DesignSystem.Colors.border, lineWidth: 1)
-            )
-
-        case .empty:
-            Spacer()
-                .frame(height: DesignSystem.Spacing.spacing4)
+    var icon: String {
+        switch self {
+        case .proposal:
+            return "doc.text"
+        case .design:
+            return "pencil.and.ruler"
+        case .tasks:
+            return "checklist"
+        case .specs:
+            return "books.vertical"
         }
     }
-
-    /// Renders inline markdown (bold, italic, code) as an AttributedString.
-    private func renderInlineMarkdown(_ text: String) -> AttributedString {
-        do {
-            return try AttributedString(markdown: text)
-        } catch {
-            return AttributedString(text)
-        }
-    }
-}
-
-// MARK: - Markdown Line Types
-
-/// Represents a parsed line of markdown content.
-enum MarkdownLine {
-    case heading1(String)
-    case heading2(String)
-    case heading3(String)
-    case paragraph(String)
-    case listItem(String)
-    case codeBlock(String)
-    case empty
 }
 
 #Preview {

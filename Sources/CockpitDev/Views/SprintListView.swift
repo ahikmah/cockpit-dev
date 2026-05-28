@@ -19,6 +19,7 @@ struct SprintListView: View {
                     LazyVStack(spacing: DesignSystem.Spacing.spacing12) {
                         ForEach(viewModel.sprints, id: \.id) { sprint in
                             SprintRowView(sprint: sprint, viewModel: viewModel)
+                                .contentShape(RoundedRectangle(cornerRadius: DesignSystem.Radius.medium))
                                 .onTapGesture {
                                     viewModel.selectedSprint = sprint
                                 }
@@ -192,6 +193,7 @@ struct SprintRowView: View {
                     lineWidth: 1
                 )
         )
+        .contentShape(RoundedRectangle(cornerRadius: DesignSystem.Radius.medium))
         .shadow(color: Color.black.opacity(0.04), radius: 2, x: 0, y: 1)
     }
 

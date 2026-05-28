@@ -1,7 +1,7 @@
 import XCTest
 @testable import CockpitDev
 
-final class ValidatorsTests: XCTestCase {
+final class ValidatorsTests: CockpitDevTestCase {
 
     // MARK: - Workspace Name Validation
 

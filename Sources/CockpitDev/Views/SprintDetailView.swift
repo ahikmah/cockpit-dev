@@ -4,33 +4,47 @@ import SwiftData
 /// Displays detailed information about a sprint including assigned tickets,
 /// progress, and burndown chart.
 struct SprintDetailView: View {
+    @Environment(\.modelContext) private var modelContext
     let sprint: Sprint
     @Bindable var viewModel: SprintViewModel
+    let syncEngine: SyncEngine?
+    @State private var selectedDetailTicket: Ticket?
+    @State private var showDeleteConfirmation = false
+    @State private var ticketDetailViewModel = TicketManagementViewModel()
+    @State private var createTicketViewModel = TicketManagementViewModel()
+    @State private var dependencyViewModel = DependencyViewModel()
+    @State private var showCreateTicket = false
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: DesignSystem.Spacing.spacing20) {
-                // Sprint header with progress
-                sprintHeader
+        GeometryReader { geometry in
+            HStack(spacing: 0) {
+                sprintContent
+                    .frame(width: selectedDetailTicket == nil ? nil : max(300, geometry.size.width - inspectorWidth(in: geometry.size.width)))
 
-                Divider()
-
-                // Burndown chart
-                burndownSection
-
-                Divider()
-
-                // Assigned tickets
-                ticketsSection
-
-                // Sprint completion actions
-                if viewModel.isSprintCompleted(sprint) && viewModel.incompleteTicketCount(for: sprint) > 0 {
+                if let selectedDetailTicket {
                     Divider()
-                    completionActionsSection
+                    TicketDetailSheet(
+                        viewModel: ticketDetailViewModel,
+                        dependencyViewModel: dependencyViewModel,
+                        ticket: selectedDetailTicket,
+                        members: viewModel.workspace?.members ?? [],
+                        presentation: .inspector,
+                        onClose: { self.selectedDetailTicket = nil },
+                        onOpenDependency: { linkedTicket in
+                            self.selectedDetailTicket = linkedTicket
+                            dependencyViewModel.evaluateConflictsForTicket(linkedTicket)
+                        }
+                    )
+                    .frame(width: inspectorWidth(in: geometry.size.width))
+                    .transition(.move(edge: .trailing).combined(with: .opacity))
                 }
             }
-            .padding(DesignSystem.Spacing.spacing20)
         }
+        .onAppear(perform: configureTicketDetailDependencies)
+        .onChange(of: viewModel.workspace?.id) { _, _ in
+            configureTicketDetailDependencies()
+        }
+        .animation(.snappy(duration: 0.18), value: selectedDetailTicket?.id)
         .alert("Move Incomplete Tickets", isPresented: $viewModel.showMoveToNextSprint) {
             Button("Move to Next Sprint") {
                 viewModel.moveIncompleteToNextSprint(from: sprint)
@@ -62,6 +76,72 @@ struct SprintDetailView: View {
         .sheet(isPresented: $viewModel.showTicketAssignment) {
             TicketAssignmentSheet(sprint: sprint, viewModel: viewModel)
         }
+        .sheet(isPresented: $showCreateTicket) {
+            CreateTicketSheet(
+                viewModel: createTicketViewModel,
+                members: viewModel.workspace?.members ?? [],
+                sprints: viewModel.workspace?.sprints.sorted { $0.startDate < $1.startDate } ?? [],
+                defaultSprint: sprint
+            )
+        }
+        .confirmationDialog("Delete Sprint", isPresented: $showDeleteConfirmation) {
+            Button("Delete Sprint", role: .destructive) {
+                Task {
+                    await viewModel.deleteSprint(sprint)
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This removes the sprint locally and deletes the linked GitLab milestone when connected. Assigned tickets are kept and unassigned.")
+        }
+    }
+
+    private func inspectorWidth(in containerWidth: CGFloat) -> CGFloat {
+        min(max(540, containerWidth * 0.58), max(420, containerWidth - 300))
+    }
+
+    private var sprintContent: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: DesignSystem.Spacing.spacing20) {
+                // Sprint header with progress
+                sprintHeader
+
+                Divider()
+
+                // Burndown chart
+                burndownSection
+
+                Divider()
+
+                // Assigned tickets
+                ticketsSection
+
+                // Sprint completion actions
+                if viewModel.isSprintCompleted(sprint) && viewModel.incompleteTicketCount(for: sprint) > 0 {
+                    Divider()
+                    completionActionsSection
+                }
+            }
+            .padding(DesignSystem.Spacing.spacing20)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func configureTicketDetailDependencies() {
+        ticketDetailViewModel.configure(
+            modelContext: modelContext,
+            syncEngine: syncEngine,
+            workspace: viewModel.workspace
+        )
+        createTicketViewModel.configure(
+            modelContext: modelContext,
+            syncEngine: syncEngine,
+            workspace: viewModel.workspace
+        )
+        dependencyViewModel.configure(
+            modelContext: modelContext,
+            workspace: viewModel.workspace
+        )
     }
 
     // MARK: - Sprint Header
@@ -84,6 +164,18 @@ struct SprintDetailView: View {
                 }
 
                 Spacer()
+
+                Button {
+                    showDeleteConfirmation = true
+                } label: {
+                    Image(systemName: "trash")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundColor(DesignSystem.Colors.danger)
+                        .padding(8)
+                        .background(DesignSystem.Colors.dangerSoft)
+                        .clipShape(RoundedRectangle(cornerRadius: DesignSystem.Radius.small))
+                }
+                .buttonStyle(.plain)
 
                 // Status badge
                 Text(viewModel.statusLabel(for: sprint))
@@ -186,6 +278,20 @@ struct SprintDetailView: View {
                 Spacer()
 
                 Button {
+                    showCreateTicket = true
+                } label: {
+                    HStack(spacing: DesignSystem.Spacing.spacing4) {
+                        Image(systemName: "plus")
+                            .font(.system(size: 11, weight: .medium))
+                        Text("New Ticket")
+                            .font(DesignSystem.Typography.bodyMedium)
+                    }
+                    .foregroundColor(DesignSystem.Colors.accent)
+                }
+                .buttonStyle(.plain)
+                .help("Create a GitLab issue in this sprint")
+
+                Button {
                     viewModel.refreshUnassignedTickets()
                     viewModel.showTicketAssignment = true
                 } label: {
@@ -216,8 +322,10 @@ struct SprintDetailView: View {
                 }
             } else {
                 LazyVStack(spacing: DesignSystem.Spacing.spacing8) {
-                    ForEach(sprint.tickets.sorted(by: { ($0.storyPoints ?? 0) > ($1.storyPoints ?? 0) }), id: \.id) { ticket in
-                        SprintTicketRow(ticket: ticket, viewModel: viewModel, sprint: sprint)
+                    ForEach(viewModel.orderedTickets(for: sprint), id: \.id) { ticket in
+                        SprintTicketRow(ticket: ticket, viewModel: viewModel, sprint: sprint) {
+                            selectedDetailTicket = ticket
+                        }
                     }
                 }
             }
@@ -281,6 +389,7 @@ struct SprintTicketRow: View {
     let ticket: Ticket
     @Bindable var viewModel: SprintViewModel
     let sprint: Sprint
+    let onOpen: () -> Void
 
     var body: some View {
         HStack(spacing: DesignSystem.Spacing.spacing12) {
@@ -332,6 +441,8 @@ struct SprintTicketRow: View {
             }
             .buttonStyle(.plain)
         }
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onOpen)
         .padding(.horizontal, DesignSystem.Spacing.spacing12)
         .padding(.vertical, DesignSystem.Spacing.spacing8)
         .background(DesignSystem.Colors.surface)

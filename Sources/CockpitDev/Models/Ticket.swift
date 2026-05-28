@@ -19,6 +19,13 @@ class Ticket {
     var updatedAt: Date
     var lastSyncedAt: Date?
     var localVersion: Int
+    var deadlineAppealStatusRaw: String = DeadlineAppealStatus.none.rawValue
+    var deadlineAppealReason: String?
+    var deadlineAppealDecidedAt: Date?
+    var deadlineAppealDecidedBy: String?
+    var realizedAt: Date?
+    var realizationSourceRaw: String?
+    var realizationReference: String?
 
     var assignee: Member?
     var sprint: Sprint?
@@ -43,7 +50,14 @@ class Ticket {
         createdAt: Date = Date(),
         updatedAt: Date = Date(),
         lastSyncedAt: Date? = nil,
-        localVersion: Int = 0
+        localVersion: Int = 0,
+        deadlineAppealStatus: DeadlineAppealStatus = .none,
+        deadlineAppealReason: String? = nil,
+        deadlineAppealDecidedAt: Date? = nil,
+        deadlineAppealDecidedBy: String? = nil,
+        realizedAt: Date? = nil,
+        realizationSource: TicketRealizationSource? = nil,
+        realizationReference: String? = nil
     ) {
         self.id = id
         self.gitlabIssueId = gitlabIssueId
@@ -61,7 +75,33 @@ class Ticket {
         self.updatedAt = updatedAt
         self.lastSyncedAt = lastSyncedAt
         self.localVersion = localVersion
+        self.deadlineAppealStatusRaw = deadlineAppealStatus.rawValue
+        self.deadlineAppealReason = deadlineAppealReason
+        self.deadlineAppealDecidedAt = deadlineAppealDecidedAt
+        self.deadlineAppealDecidedBy = deadlineAppealDecidedBy
+        self.realizedAt = realizedAt
+        self.realizationSourceRaw = realizationSource?.rawValue
+        self.realizationReference = realizationReference
         self.blockedBy = []
         self.blocks = []
+    }
+
+    var deadlineAppealStatus: DeadlineAppealStatus {
+        get {
+            DeadlineAppealStatus(rawValue: deadlineAppealStatusRaw) ?? .none
+        }
+        set {
+            deadlineAppealStatusRaw = newValue.rawValue
+        }
+    }
+
+    var realizationSource: TicketRealizationSource? {
+        get {
+            guard let realizationSourceRaw else { return nil }
+            return TicketRealizationSource(rawValue: realizationSourceRaw)
+        }
+        set {
+            realizationSourceRaw = newValue?.rawValue
+        }
     }
 }

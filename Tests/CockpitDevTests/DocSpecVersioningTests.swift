@@ -10,7 +10,8 @@ import SwiftData
 /// - Diff computation (LCS-based)
 /// - Unread version badge logic
 /// - Badge removal on history open
-final class DocSpecVersioningTests: XCTestCase {
+@MainActor
+final class DocSpecVersioningTests: CockpitDevTestCase {
 
     private var modelContainer: ModelContainer!
     private var modelContext: ModelContext!
@@ -238,6 +239,69 @@ final class DocSpecVersioningTests: XCTestCase {
         XCTAssertNotNil(version.detectedAt)
     }
 
+    // MARK: - OpenSpec Document Snapshot Tests
+
+    func testOpenSpecDocumentSnapshot_roundTripsAllDocuments() throws {
+        let snapshot = OpenSpecDocumentSnapshot(
+            proposal: "# Proposal",
+            design: "# Design",
+            tasks: "- [ ] Ship",
+            specs: [
+                .init(path: "specs/adjacent-articles-api/spec.md", content: "# Adjacent Articles")
+            ]
+        )
+
+        let encoded = try snapshot.encodedContent()
+        let decoded = OpenSpecDocumentSnapshot.decode(encoded, legacyPhase: .proposal)
+
+        XCTAssertEqual(decoded, snapshot)
+    }
+
+    func testOpenSpecDocumentSnapshot_legacyContentUsesSavedPhase() {
+        let snapshot = OpenSpecDocumentSnapshot.decode("# Design", legacyPhase: .design)
+
+        XCTAssertNil(snapshot.proposal)
+        XCTAssertEqual(snapshot.design, "# Design")
+        XCTAssertNil(snapshot.tasks)
+        XCTAssertTrue(snapshot.specs.isEmpty)
+    }
+
+    func testOpenSpecDocumentSnapshotTaskProgressCountsCompletedCheckboxes() {
+        let snapshot = OpenSpecDocumentSnapshot(
+            proposal: nil,
+            design: nil,
+            tasks: """
+            # Tasks
+
+            - [x] Implement API client
+            - [X] Add unit tests
+            - [ ] Polish UI states
+            - plain bullet should not count
+            """,
+            specs: []
+        )
+
+        XCTAssertEqual(snapshot.taskProgress?.completed, 2)
+        XCTAssertEqual(snapshot.taskProgress?.total, 3)
+        XCTAssertEqual(snapshot.taskProgress?.percentage, 67)
+        XCTAssertEqual(snapshot.taskProgress?.displayText, "67%")
+    }
+
+    func testOpenSpecDocumentSnapshotTaskProgressUnavailableWhenNoCheckboxTasks() {
+        let snapshot = OpenSpecDocumentSnapshot(
+            proposal: nil,
+            design: nil,
+            tasks: """
+            # Tasks
+
+            Nothing actionable yet.
+            """,
+            specs: []
+        )
+
+        XCTAssertNil(snapshot.taskProgress)
+    }
+
     // MARK: - Version History Ordering Tests
 
     func testVersionHistory_reverseChronologicalOrder() {
@@ -417,6 +481,29 @@ final class DocSpecVersioningTests: XCTestCase {
         XCTAssertFalse(spec.hasUnreadVersion)
     }
 
+    func testUnreadBadge_scannedEntryCanBeSavedWhenMarkedAsRead() throws {
+        let workspace = Workspace(name: "Test", specDirectoryPath: "openspec/changes")
+        modelContext.insert(workspace)
+
+        let spec = OpenSpecEntry(
+            specName: "new-change",
+            branchName: "feature/new-change",
+            phase: .proposal,
+            isAvailable: true,
+            hasUnreadVersion: true
+        )
+        spec.workspace = workspace
+        modelContext.insert(spec)
+        try modelContext.save()
+
+        let viewModel = SpecViewModel(workspace: workspace)
+        viewModel.configure(modelContext: modelContext, apiClient: mockAPIClient)
+
+        viewModel.markAsRead(spec)
+
+        XCTAssertFalse(spec.hasUnreadVersion)
+    }
+
     func testUnreadBadge_multipleSpecsIndependent() {
         // Given: Two specs, one with unread badge
         let workspace = Workspace(name: "Test", specDirectoryPath: ".kiro/specs")
@@ -450,5 +537,110 @@ final class DocSpecVersioningTests: XCTestCase {
         // Then: spec1 badge removed, spec2 badge remains
         XCTAssertFalse(spec1.hasUnreadVersion)
         XCTAssertTrue(spec2.hasUnreadVersion)
+    }
+
+    func testSpecDirectoryPathNormalization_removesRepositoryNamePrefix() {
+        let normalized = SpecViewModel.normalizedSpecDirectoryPath(
+            "cyint/openspec/changes",
+            repositoryName: "cyint"
+        )
+
+        XCTAssertEqual(normalized, "openspec/changes")
+    }
+
+    func testSpecDirectoryPathNormalization_trimsSlashesAndWhitespace() {
+        let normalized = SpecViewModel.normalizedSpecDirectoryPath(
+            " /openspec/changes/ ",
+            repositoryName: "cyint"
+        )
+
+        XCTAssertEqual(normalized, "openspec/changes")
+    }
+
+    func testSelectedBranch_defaultsToRepositoryDefaultBranch() {
+        let workspace = Workspace(name: "Test")
+        let repository = Repository(
+            gitlabProjectId: 42,
+            name: "cyint",
+            url: "https://gitlab.example.com/devbuddy/cyint",
+            defaultBranch: "orbit-dev-84"
+        )
+        repository.workspace = workspace
+        workspace.repositories = [repository]
+
+        let viewModel = SpecViewModel(workspace: workspace)
+
+        XCTAssertEqual(viewModel.selectedBranchName, "orbit-dev-84")
+    }
+
+    func testSpecs_onlyContainsSelectedBranchEntries() {
+        let workspace = Workspace(name: "Test")
+        let repository = Repository(
+            gitlabProjectId: 42,
+            name: "cyint",
+            url: "https://gitlab.example.com/devbuddy/cyint",
+            defaultBranch: "orbit-dev-84"
+        )
+        repository.workspace = workspace
+        workspace.repositories = [repository]
+
+        let selected = OpenSpecEntry(specName: "selected", branchName: "orbit-dev-84")
+        let other = OpenSpecEntry(specName: "other", branchName: "feature/other")
+        selected.workspace = workspace
+        other.workspace = workspace
+        workspace.specs = [selected, other]
+
+        let viewModel = SpecViewModel(workspace: workspace)
+
+        XCTAssertEqual(viewModel.specs.map(\.specName), ["selected"])
+    }
+
+    func testSelectBranch_clearsSelectionFromAHiddenBranch() {
+        let workspace = Workspace(name: "Test")
+        let repository = Repository(
+            gitlabProjectId: 42,
+            name: "cyint",
+            url: "https://gitlab.example.com/devbuddy/cyint",
+            defaultBranch: "orbit-dev-84"
+        )
+        repository.workspace = workspace
+        workspace.repositories = [repository]
+
+        let selected = OpenSpecEntry(specName: "selected", branchName: "orbit-dev-84")
+        let other = OpenSpecEntry(specName: "other", branchName: "feature/other")
+        selected.workspace = workspace
+        other.workspace = workspace
+        workspace.specs = [selected, other]
+
+        let viewModel = SpecViewModel(workspace: workspace)
+        viewModel.selectedSpec = selected
+
+        viewModel.selectBranch("feature/other")
+
+        XCTAssertNil(viewModel.selectedSpec)
+        XCTAssertEqual(viewModel.specs.map(\.specName), ["other"])
+    }
+
+    func testReconcileSelection_preservesAVisibleSelection() {
+        let workspace = Workspace(name: "Test")
+        let repository = Repository(
+            gitlabProjectId: 42,
+            name: "cyint",
+            url: "https://gitlab.example.com/devbuddy/cyint",
+            defaultBranch: "orbit-dev-84"
+        )
+        repository.workspace = workspace
+        workspace.repositories = [repository]
+
+        let selected = OpenSpecEntry(specName: "selected", branchName: "orbit-dev-84")
+        selected.workspace = workspace
+        workspace.specs = [selected]
+
+        let viewModel = SpecViewModel(workspace: workspace)
+        viewModel.selectedSpec = selected
+
+        viewModel.reconcileSelection()
+
+        XCTAssertEqual(viewModel.selectedSpec?.id, selected.id)
     }
 }

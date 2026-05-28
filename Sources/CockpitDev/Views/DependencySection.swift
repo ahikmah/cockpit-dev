@@ -7,9 +7,22 @@ struct DependencySection: View {
     let ticket: Ticket
     @Bindable var viewModel: DependencyViewModel
     let isEditing: Bool
+    let onOpenTicket: ((Ticket) -> Void)?
 
     @State private var showAddBlocker: Bool = false
     @State private var blockerSearchText: String = ""
+
+    init(
+        ticket: Ticket,
+        viewModel: DependencyViewModel,
+        isEditing: Bool,
+        onOpenTicket: ((Ticket) -> Void)? = nil
+    ) {
+        self.ticket = ticket
+        self.viewModel = viewModel
+        self.isEditing = isEditing
+        self.onOpenTicket = onOpenTicket
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: DesignSystem.Spacing.spacing12) {
@@ -137,6 +150,11 @@ struct DependencySection: View {
             RoundedRectangle(cornerRadius: DesignSystem.Radius.small)
                 .fill(DesignSystem.Colors.accentSoft.opacity(0.5))
         )
+        .contentShape(RoundedRectangle(cornerRadius: DesignSystem.Radius.small))
+        .onTapGesture {
+            onOpenTicket?(linkedTicket)
+        }
+        .help(onOpenTicket == nil ? "" : "Open linked ticket")
     }
 
     // MARK: - Add Blocker Search

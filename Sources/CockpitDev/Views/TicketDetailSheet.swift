@@ -1,6 +1,18 @@
 import SwiftUI
 import SwiftData
 
+private enum MarkdownEditMode: String, CaseIterable, Identifiable {
+    case write = "Write"
+    case preview = "Preview"
+
+    var id: String { rawValue }
+}
+
+enum TicketDetailPresentation {
+    case sheet
+    case inspector
+}
+
 /// Sheet for viewing and editing all fields of an existing ticket.
 /// Supports inline editing with save, and displays non-standard SP indicator.
 struct TicketDetailSheet: View {
@@ -16,6 +28,10 @@ struct TicketDetailSheet: View {
     /// Members available for assignment.
     let members: [Member]
 
+    let presentation: TicketDetailPresentation
+    let onClose: (() -> Void)?
+    let onOpenDependency: ((Ticket) -> Void)?
+
     // MARK: - Edit State
 
     @State private var isEditing: Bool = false
@@ -28,11 +44,30 @@ struct TicketDetailSheet: View {
     @State private var editStartDate: Date? = nil
     @State private var editEndDate: Date? = nil
     @State private var editStatus: TicketStatus = .backlog
+    @State private var markdownEditMode: MarkdownEditMode = .write
 
     // MARK: - Validation
 
     @State private var storyPointsError: String?
     @State private var titleError: String?
+
+    init(
+        viewModel: TicketManagementViewModel,
+        dependencyViewModel: DependencyViewModel,
+        ticket: Ticket,
+        members: [Member],
+        presentation: TicketDetailPresentation = .sheet,
+        onClose: (() -> Void)? = nil,
+        onOpenDependency: ((Ticket) -> Void)? = nil
+    ) {
+        self.viewModel = viewModel
+        self.dependencyViewModel = dependencyViewModel
+        self.ticket = ticket
+        self.members = members
+        self.presentation = presentation
+        self.onClose = onClose
+        self.onOpenDependency = onOpenDependency
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -42,9 +77,9 @@ struct TicketDetailSheet: View {
             Divider()
             footer
         }
-        .frame(width: 560, height: 650)
+        .modifier(TicketDetailPresentationFrame(presentation: presentation))
         .background(DesignSystem.Colors.surfaceElevated)
-        .clipShape(RoundedRectangle(cornerRadius: DesignSystem.Radius.xl))
+        .clipShape(RoundedRectangle(cornerRadius: presentation == .sheet ? DesignSystem.Radius.xl : DesignSystem.Radius.large))
         .onAppear {
             loadTicketData()
             dependencyViewModel.evaluateConflictsForTicket(ticket)
@@ -68,16 +103,30 @@ struct TicketDetailSheet: View {
     // MARK: - Header
 
     private var header: some View {
-        HStack {
-            VStack(alignment: .leading, spacing: DesignSystem.Spacing.spacing4) {
-                if let iid = ticket.gitlabIssueIid {
-                    Text("#\(iid)")
-                        .font(DesignSystem.Typography.caption)
-                        .foregroundStyle(DesignSystem.Colors.textTertiary)
+        HStack(alignment: .top, spacing: DesignSystem.Spacing.spacing16) {
+            VStack(alignment: .leading, spacing: DesignSystem.Spacing.spacing10) {
+                HStack(spacing: DesignSystem.Spacing.spacing8) {
+                    if let iid = ticket.gitlabIssueIid {
+                        Text("#\(iid)")
+                            .font(.system(size: 13, weight: .semibold, design: .rounded))
+                            .foregroundStyle(DesignSystem.Colors.textSecondary)
+                    }
+                    statusBadge(ticket.status)
+                    if let priority = ticket.priority {
+                        priorityBadge(priority)
+                    }
+                    if let sp = ticket.storyPoints {
+                        storyPointsDisplay(sp)
+                    }
                 }
+
                 Text(isEditing ? "Edit Ticket" : "Ticket Details")
                     .font(DesignSystem.Typography.headingMedium)
                     .foregroundStyle(DesignSystem.Colors.textPrimary)
+                Text(ticket.title)
+                    .font(.system(size: 15, weight: .medium, design: .rounded))
+                    .foregroundStyle(DesignSystem.Colors.textSecondary)
+                    .lineLimit(2)
             }
 
             Spacer()
@@ -89,7 +138,7 @@ struct TicketDetailSheet: View {
             }
 
             Button {
-                dismiss()
+                close()
             } label: {
                 Image(systemName: "xmark.circle.fill")
                     .font(.system(size: 18))
@@ -98,6 +147,14 @@ struct TicketDetailSheet: View {
             .buttonStyle(.plain)
         }
         .padding(DesignSystem.Spacing.spacing24)
+    }
+
+    private func close() {
+        if let onClose {
+            onClose()
+        } else {
+            dismiss()
+        }
     }
 
     // MARK: - Detail Content
@@ -118,47 +175,17 @@ struct TicketDetailSheet: View {
     // MARK: - Read-Only Fields
 
     private var readOnlyFields: some View {
-        VStack(alignment: .leading, spacing: DesignSystem.Spacing.spacing16) {
-            // Title
-            fieldRow(label: "Title") {
+        VStack(alignment: .leading, spacing: DesignSystem.Spacing.spacing20) {
+            VStack(alignment: .leading, spacing: DesignSystem.Spacing.spacing12) {
                 Text(ticket.title)
-                    .font(DesignSystem.Typography.bodyRegular)
+                    .font(.system(size: 24, weight: .bold, design: .rounded))
                     .foregroundStyle(DesignSystem.Colors.textPrimary)
-            }
+                    .fixedSize(horizontal: false, vertical: true)
 
-            // Status
-            fieldRow(label: "Status") {
-                statusBadge(ticket.status)
-            }
+                metadataOverview
 
-            // Priority
-            if let priority = ticket.priority {
-                fieldRow(label: "Priority") {
-                    priorityBadge(priority)
-                }
-            }
-
-            // Story Points
-            if let sp = ticket.storyPoints {
-                fieldRow(label: "Story Points") {
-                    storyPointsDisplay(sp)
-                }
-            }
-
-            // Description
-            if let desc = ticket.descriptionText, !desc.isEmpty {
-                fieldRow(label: "Description") {
-                    Text(desc)
-                        .font(DesignSystem.Typography.bodyRegular)
-                        .foregroundStyle(DesignSystem.Colors.textPrimary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-            }
-
-            // Labels
-            if !ticket.labels.isEmpty {
-                fieldRow(label: "Labels") {
-                    FlowLayout(spacing: DesignSystem.Spacing.spacing4) {
+                if !ticket.labels.isEmpty {
+                    FlowLayout(spacing: DesignSystem.Spacing.spacing6) {
                         ForEach(ticket.labels, id: \.self) { label in
                             labelBadge(label)
                         }
@@ -166,48 +193,14 @@ struct TicketDetailSheet: View {
                 }
             }
 
-            // Assignee
-            if let assignee = ticket.assignee {
-                fieldRow(label: "Assignee") {
-                    HStack(spacing: DesignSystem.Spacing.spacing6) {
-                        Image(systemName: "person.circle.fill")
-                            .foregroundStyle(DesignSystem.Colors.accent)
-                        Text(assignee.displayName)
-                            .font(DesignSystem.Typography.bodyRegular)
-                            .foregroundStyle(DesignSystem.Colors.textPrimary)
-                    }
-                }
-            }
-
-            // Dates
-            if ticket.startDate != nil || ticket.endDate != nil {
-                HStack(spacing: DesignSystem.Spacing.spacing24) {
-                    if let start = ticket.startDate {
-                        fieldRow(label: "Start Date") {
-                            Text(start, style: .date)
-                                .font(DesignSystem.Typography.bodyRegular)
-                                .foregroundStyle(DesignSystem.Colors.textPrimary)
-                        }
-                    }
-                    if let end = ticket.endDate {
-                        fieldRow(label: "End Date") {
-                            Text(end, style: .date)
-                                .font(DesignSystem.Typography.bodyRegular)
-                                .foregroundStyle(DesignSystem.Colors.textPrimary)
-                        }
-                    }
-                }
-            }
-
-            // Dependencies
-            Divider()
-                .padding(.vertical, DesignSystem.Spacing.spacing8)
-
             DependencySection(
                 ticket: ticket,
                 viewModel: dependencyViewModel,
-                isEditing: false
+                isEditing: false,
+                onOpenTicket: onOpenDependency
             )
+
+            descriptionCard
 
             // Metadata
             Divider()
@@ -215,6 +208,61 @@ struct TicketDetailSheet: View {
 
             metadataSection
         }
+    }
+
+    private var metadataOverview: some View {
+        FlowLayout(spacing: DesignSystem.Spacing.spacing6) {
+            statusBadge(ticket.status)
+            if let priority = ticket.priority {
+                priorityBadge(priority)
+            }
+            if let sp = ticket.storyPoints {
+                storyPointsDisplay(sp)
+            }
+            if let assignee = ticket.assignee {
+                infoChip(icon: "person.crop.circle", text: assignee.displayName)
+            }
+            if let start = ticket.startDate {
+                infoChip(icon: "calendar", text: start.formatted(date: .abbreviated, time: .omitted))
+            }
+            if let end = ticket.endDate {
+                infoChip(icon: "flag.checkered", text: end.formatted(date: .abbreviated, time: .omitted))
+            }
+        }
+    }
+
+    private var descriptionCard: some View {
+        VStack(alignment: .leading, spacing: DesignSystem.Spacing.spacing12) {
+            HStack {
+                Label("Description", systemImage: "text.alignleft")
+                    .font(DesignSystem.Typography.captionMedium)
+                    .foregroundStyle(DesignSystem.Colors.textSecondary)
+                Spacer()
+                Text("Markdown")
+                    .font(DesignSystem.Typography.caption)
+                    .foregroundStyle(DesignSystem.Colors.textTertiary)
+            }
+
+            if let desc = ticket.descriptionText, !desc.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                MarkdownRendererView(content: desc)
+                    .textSelection(.enabled)
+            } else {
+                Text("No description.")
+                    .font(DesignSystem.Typography.bodyRegular)
+                    .foregroundStyle(DesignSystem.Colors.textTertiary)
+                    .frame(maxWidth: .infinity, minHeight: 120, alignment: .center)
+            }
+        }
+        .padding(DesignSystem.Spacing.spacing16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: DesignSystem.Radius.large)
+                .fill(DesignSystem.Colors.surface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: DesignSystem.Radius.large)
+                .stroke(DesignSystem.Colors.border, lineWidth: 1)
+        )
     }
 
     // MARK: - Editable Fields
@@ -337,23 +385,52 @@ struct TicketDetailSheet: View {
 
             // Description
             VStack(alignment: .leading, spacing: DesignSystem.Spacing.spacing6) {
-                Text("Description")
-                    .font(DesignSystem.Typography.captionMedium)
-                    .foregroundStyle(DesignSystem.Colors.textSecondary)
+                HStack {
+                    Text("Description")
+                        .font(DesignSystem.Typography.captionMedium)
+                        .foregroundStyle(DesignSystem.Colors.textSecondary)
+                    Spacer()
+                    Picker("Markdown mode", selection: $markdownEditMode) {
+                        ForEach(MarkdownEditMode.allCases) { mode in
+                            Text(mode.rawValue).tag(mode)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.segmented)
+                    .frame(width: 180)
+                }
 
-                TextEditor(text: $editDescription)
-                    .font(DesignSystem.Typography.bodyRegular)
-                    .frame(minHeight: 80, maxHeight: 120)
-                    .padding(DesignSystem.Spacing.spacing8)
-                    .background(
-                        RoundedRectangle(cornerRadius: DesignSystem.Radius.medium)
-                            .fill(Color(nsColor: .controlBackgroundColor))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: DesignSystem.Radius.medium)
-                            .stroke(DesignSystem.Colors.border, lineWidth: 1)
-                    )
-                    .scrollContentBackground(.hidden)
+                Group {
+                    switch markdownEditMode {
+                    case .write:
+                        TextEditor(text: $editDescription)
+                            .font(DesignSystem.Typography.monospace)
+                            .frame(minHeight: 220)
+                            .padding(DesignSystem.Spacing.spacing10)
+                            .scrollContentBackground(.hidden)
+                    case .preview:
+                        ScrollView {
+                            if editDescription.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                Text("Nothing to preview.")
+                                    .font(DesignSystem.Typography.bodyRegular)
+                                    .foregroundStyle(DesignSystem.Colors.textTertiary)
+                                    .frame(maxWidth: .infinity, minHeight: 220, alignment: .center)
+                            } else {
+                                MarkdownRendererView(content: editDescription)
+                                    .padding(DesignSystem.Spacing.spacing12)
+                            }
+                        }
+                        .frame(minHeight: 220)
+                    }
+                }
+                .background(
+                    RoundedRectangle(cornerRadius: DesignSystem.Radius.medium)
+                        .fill(Color(nsColor: .controlBackgroundColor))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: DesignSystem.Radius.medium)
+                        .stroke(DesignSystem.Colors.border, lineWidth: 1)
+                )
             }
 
             // Labels
@@ -488,7 +565,8 @@ struct TicketDetailSheet: View {
             DependencySection(
                 ticket: ticket,
                 viewModel: dependencyViewModel,
-                isEditing: true
+                isEditing: true,
+                onOpenTicket: onOpenDependency
             )
         }
     }
@@ -602,14 +680,18 @@ struct TicketDetailSheet: View {
     }
 
     private func statusBadge(_ status: TicketStatus) -> some View {
-        Text(status.displayName)
+        Label(status.displayName, systemImage: status.iconName)
             .font(DesignSystem.Typography.captionMedium)
-            .foregroundStyle(.white)
-            .padding(.horizontal, DesignSystem.Spacing.spacing8)
+            .foregroundStyle(status.color)
+            .padding(.horizontal, DesignSystem.Spacing.spacing10)
             .padding(.vertical, DesignSystem.Spacing.spacing4)
             .background(
-                RoundedRectangle(cornerRadius: DesignSystem.Radius.small)
-                    .fill(status.color)
+                Capsule()
+                    .fill(status.color.opacity(0.16))
+            )
+            .overlay(
+                Capsule()
+                    .stroke(status.color.opacity(0.55), lineWidth: 1)
             )
     }
 
@@ -621,35 +703,70 @@ struct TicketDetailSheet: View {
                 .font(DesignSystem.Typography.captionMedium)
         }
         .foregroundStyle(priority.color)
+        .padding(.horizontal, DesignSystem.Spacing.spacing10)
+        .padding(.vertical, DesignSystem.Spacing.spacing4)
+        .background(
+            Capsule()
+                .fill(priority.color.opacity(0.14))
+        )
+        .overlay(
+            Capsule()
+                .stroke(priority.color.opacity(0.5), lineWidth: 1)
+        )
     }
 
-    /// Displays story points with a non-standard indicator (⚠️) for external values
-    /// not in the Fibonacci set.
+    /// Displays story points with their planning-system source.
     private func storyPointsDisplay(_ value: Int) -> some View {
         HStack(spacing: DesignSystem.Spacing.spacing4) {
-            Text("\(value)")
-                .font(DesignSystem.Typography.bodyMedium)
-                .foregroundStyle(DesignSystem.Colors.textPrimary)
-
-            if viewModel.isNonStandardStoryPoints(value) {
-                Text("⚠️")
-                    .font(.system(size: 12))
-                Text("Non-standard")
-                    .font(DesignSystem.Typography.caption)
-                    .foregroundStyle(DesignSystem.Colors.warning)
-            }
+            Image(systemName: "number.circle")
+                .font(.system(size: 11, weight: .semibold))
+            Text("\(value) SP")
+                .font(DesignSystem.Typography.captionMedium)
+            Text("Planning DB")
+                .font(DesignSystem.Typography.caption)
         }
+        .foregroundStyle(DesignSystem.Colors.accent)
+        .padding(.horizontal, DesignSystem.Spacing.spacing10)
+        .padding(.vertical, DesignSystem.Spacing.spacing4)
+        .background(
+            Capsule()
+                .fill(DesignSystem.Colors.accent.opacity(0.14))
+        )
+        .overlay(
+            Capsule()
+                .stroke(DesignSystem.Colors.accent.opacity(0.5), lineWidth: 1)
+        )
     }
 
     private func labelBadge(_ label: String) -> some View {
         Text(label)
-            .font(DesignSystem.Typography.caption)
-            .foregroundStyle(DesignSystem.Colors.accent)
-            .padding(.horizontal, DesignSystem.Spacing.spacing8)
-            .padding(.vertical, DesignSystem.Spacing.spacing2)
+            .font(DesignSystem.Typography.captionMedium)
+            .foregroundStyle(DesignSystem.Colors.textPrimary)
+            .padding(.horizontal, DesignSystem.Spacing.spacing10)
+            .padding(.vertical, DesignSystem.Spacing.spacing4)
             .background(
-                RoundedRectangle(cornerRadius: DesignSystem.Radius.small)
-                    .fill(DesignSystem.Colors.accentSoft)
+                Capsule()
+                    .fill(DesignSystem.Colors.accentSoft.opacity(0.75))
+            )
+            .overlay(
+                Capsule()
+                    .stroke(DesignSystem.Colors.accent.opacity(0.24), lineWidth: 1)
+            )
+    }
+
+    private func infoChip(icon: String, text: String) -> some View {
+        Label(text, systemImage: icon)
+            .font(DesignSystem.Typography.captionMedium)
+            .foregroundStyle(DesignSystem.Colors.textSecondary)
+            .padding(.horizontal, DesignSystem.Spacing.spacing10)
+            .padding(.vertical, DesignSystem.Spacing.spacing4)
+            .background(
+                Capsule()
+                    .fill(DesignSystem.Colors.background)
+            )
+            .overlay(
+                Capsule()
+                    .stroke(DesignSystem.Colors.border, lineWidth: 1)
             )
     }
 
@@ -681,7 +798,7 @@ struct TicketDetailSheet: View {
         guard !trimmed.isEmpty else { return false }
         if !editStoryPointsText.isEmpty {
             guard let sp = Int(editStoryPointsText),
-                  AppConstants.fibonacciSequence.contains(sp) else { return false }
+                  viewModel.validateStoryPoints(sp) == nil else { return false }
         }
         return true
     }
@@ -745,6 +862,22 @@ struct TicketDetailSheet: View {
     }
 }
 
+private struct TicketDetailPresentationFrame: ViewModifier {
+    let presentation: TicketDetailPresentation
+
+    func body(content: Content) -> some View {
+        switch presentation {
+        case .sheet:
+            content
+                .frame(width: 760, height: 720)
+        case .inspector:
+            content
+                .frame(minWidth: 620, idealWidth: 740, maxWidth: 860)
+                .frame(maxHeight: .infinity)
+        }
+    }
+}
+
 // MARK: - TicketStatus Display Extension
 
 extension TicketStatus {
@@ -765,6 +898,16 @@ extension TicketStatus {
         case .inProgress: return DesignSystem.Colors.warning
         case .inReview: return Color.purple
         case .done: return DesignSystem.Colors.success
+        }
+    }
+
+    var iconName: String {
+        switch self {
+        case .backlog: return "tray"
+        case .todo: return "circle"
+        case .inProgress: return "play.circle"
+        case .inReview: return "eye"
+        case .done: return "checkmark.circle"
         }
     }
 }

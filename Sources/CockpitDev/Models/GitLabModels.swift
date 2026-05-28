@@ -18,6 +18,7 @@ struct GitLabIssue: Codable, Identifiable {
     let createdAt: Date
     let updatedAt: Date
     let closedAt: Date?
+    let startDate: String?
     let dueDate: String?
     let webUrl: String
 
@@ -28,6 +29,7 @@ struct GitLabIssue: Codable, Identifiable {
         case createdAt = "created_at"
         case updatedAt = "updated_at"
         case closedAt = "closed_at"
+        case startDate = "start_date"
         case dueDate = "due_date"
         case webUrl = "web_url"
     }

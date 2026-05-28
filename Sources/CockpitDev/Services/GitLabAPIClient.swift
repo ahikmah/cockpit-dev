@@ -57,13 +57,16 @@ struct IssueUpdateFields: Encodable {
     var weight: Int?
     var assigneeIds: [Int]?
     var stateEvent: String?
+    var startDate: String?
     var dueDate: String?
     var milestoneId: Int?
+    var clearMilestone: Bool = false
 
     enum CodingKeys: String, CodingKey {
         case title, description, labels, weight
         case assigneeIds = "assignee_ids"
         case stateEvent = "state_event"
+        case startDate = "start_date"
         case dueDate = "due_date"
         case milestoneId = "milestone_id"
     }
@@ -170,7 +173,10 @@ actor GitLabAPIClient {
         description: String? = nil,
         labels: [String] = [],
         weight: Int? = nil,
-        assigneeId: Int? = nil
+        assigneeId: Int? = nil,
+        startDate: String? = nil,
+        dueDate: String? = nil,
+        milestoneId: Int? = nil
     ) async throws -> GitLabIssue {
         let path = "/api/v4/projects/\(projectId)/issues"
 
@@ -186,6 +192,15 @@ actor GitLabAPIClient {
         }
         if let assigneeId = assigneeId {
             body["assignee_ids"] = [assigneeId]
+        }
+        if let startDate = startDate {
+            body["start_date"] = startDate
+        }
+        if let dueDate = dueDate {
+            body["due_date"] = dueDate
+        }
+        if let milestoneId = milestoneId {
+            body["milestone_id"] = milestoneId
         }
 
         return try await performRequest(method: "POST", path: path, body: body)
@@ -207,8 +222,13 @@ actor GitLabAPIClient {
         if let weight = fields.weight { body["weight"] = weight }
         if let assigneeIds = fields.assigneeIds { body["assignee_ids"] = assigneeIds }
         if let stateEvent = fields.stateEvent { body["state_event"] = stateEvent }
+        if let startDate = fields.startDate { body["start_date"] = startDate }
         if let dueDate = fields.dueDate { body["due_date"] = dueDate }
-        if let milestoneId = fields.milestoneId { body["milestone_id"] = milestoneId }
+        if fields.clearMilestone {
+            body["milestone_id"] = NSNull()
+        } else if let milestoneId = fields.milestoneId {
+            body["milestone_id"] = milestoneId
+        }
 
         return try await performRequest(method: "PUT", path: path, body: body)
     }
@@ -232,6 +252,7 @@ actor GitLabAPIClient {
         let path = "/api/v4/projects/\(projectId)/issues"
 
         var queryItems: [URLQueryItem] = [
+            URLQueryItem(name: "state", value: "all"),
             URLQueryItem(name: "per_page", value: String(defaultPerPage))
         ]
         if let updatedAfter = updatedAfter {
@@ -260,6 +281,27 @@ actor GitLabAPIClient {
         return try await fetchAllPages(path: path, queryItems: queryItems)
     }
 
+    /// Fetches merge requests that GitLab relates to a specific issue.
+    /// This captures links discovered from MR metadata and commit references.
+    func fetchIssueRelatedMergeRequests(projectId: Int, issueIid: Int) async throws -> [GitLabMR] {
+        let path = "/api/v4/projects/\(projectId)/issues/\(issueIid)/related_merge_requests"
+        let queryItems: [URLQueryItem] = [
+            URLQueryItem(name: "per_page", value: String(defaultPerPage))
+        ]
+
+        return try await fetchAllPages(path: path, queryItems: queryItems)
+    }
+
+    /// Fetches issue notes, including GitLab system notes such as MR mentions.
+    func fetchIssueNotes(projectId: Int, issueIid: Int) async throws -> [GitLabNote] {
+        let path = "/api/v4/projects/\(projectId)/issues/\(issueIid)/notes"
+        let queryItems: [URLQueryItem] = [
+            URLQueryItem(name: "per_page", value: String(defaultPerPage))
+        ]
+
+        return try await fetchAllPages(path: path, queryItems: queryItems)
+    }
+
     /// Fetches the diff files for a merge request.
     /// - Parameters:
     ///   - projectId: The GitLab project ID.
@@ -274,6 +316,19 @@ actor GitLabAPIClient {
 
         let response: MRChangesResponse = try await performRequest(method: "GET", path: path)
         return response.changes
+    }
+
+    /// Fetches commits included in a merge request.
+    /// - Parameters:
+    ///   - projectId: The GitLab project ID.
+    ///   - mrIid: The merge request IID.
+    /// - Returns: Commits attached to the merge request.
+    func fetchMRCommits(projectId: Int, mrIid: Int) async throws -> [GitLabCommit] {
+        let path = "/api/v4/projects/\(projectId)/merge_requests/\(mrIid)/commits"
+        let queryItems: [URLQueryItem] = [
+            URLQueryItem(name: "per_page", value: String(defaultPerPage))
+        ]
+        return try await fetchAllPages(path: path, queryItems: queryItems)
     }
 
     /// Fetches discussions (comment threads) for a merge request.
@@ -423,6 +478,19 @@ actor GitLabAPIClient {
 
     // MARK: - Milestone Methods
 
+    /// Fetches milestones from the specified project.
+    /// - Parameter projectId: The GitLab project ID.
+    /// - Returns: An array of GitLab milestones.
+    func fetchMilestones(projectId: Int) async throws -> [GitLabMilestone] {
+        let path = "/api/v4/projects/\(projectId)/milestones"
+
+        let queryItems: [URLQueryItem] = [
+            URLQueryItem(name: "per_page", value: String(defaultPerPage))
+        ]
+
+        return try await fetchAllPages(path: path, queryItems: queryItems)
+    }
+
     /// Creates a milestone in the specified project.
     /// - Parameters:
     ///   - projectId: The GitLab project ID.
@@ -445,6 +513,12 @@ actor GitLabAPIClient {
         return try await performRequest(method: "POST", path: path, body: body)
     }
 
+    /// Deletes a milestone from the specified project.
+    func deleteMilestone(projectId: Int, milestoneId: Int) async throws {
+        let path = "/api/v4/projects/\(projectId)/milestones/\(milestoneId)"
+        _ = try await performRawRequest(method: "DELETE", path: path)
+    }
+
     // MARK: - Repository File Methods
 
     /// Fetches the content of a file from the repository.
@@ -454,7 +528,9 @@ actor GitLabAPIClient {
     ///   - ref: The branch, tag, or commit SHA to read from.
     /// - Returns: The decoded file content as a string.
     func fetchFileContent(projectId: Int, filePath: String, ref: String) async throws -> String {
-        let encodedFilePath = filePath.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? filePath
+        let encodedFilePath = filePath.addingPercentEncoding(
+            withAllowedCharacters: CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        ) ?? filePath
         let path = "/api/v4/projects/\(projectId)/repository/files/\(encodedFilePath)"
 
         let queryItems: [URLQueryItem] = [

@@ -53,49 +53,45 @@ struct WorkloadDistributionView: View {
     // MARK: - Chart
 
     private var chart: some View {
-        Chart(data) { point in
-            BarMark(
-                x: .value("Member", point.member.displayName),
-                y: .value("Story Points", point.assignedStoryPoints)
-            )
-            .foregroundStyle(point.isOverloaded ? DesignSystem.Colors.danger : DesignSystem.Colors.accent)
-            .cornerRadius(4)
-            .annotation(position: .top, alignment: .center) {
-                if point.isOverloaded {
-                    overloadBadge
-                }
-            }
-
-            // Threshold rule line
-            RuleMark(y: .value("Threshold", threshold))
-                .foregroundStyle(DesignSystem.Colors.danger.opacity(0.6))
-                .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
-        }
-        .chartXAxis {
-            AxisMarks(values: .automatic) { _ in
-                AxisValueLabel()
-                    .font(DesignSystem.Typography.caption)
-                    .foregroundStyle(DesignSystem.Colors.textSecondary)
+        VStack(spacing: DesignSystem.Spacing.spacing8) {
+            ForEach(data) { point in
+                workloadRow(point, maxValue: max(max(data.map(\.assignedStoryPoints).max() ?? 1, threshold), 1))
             }
         }
-        .chartYAxis {
-            AxisMarks(position: .leading) { _ in
-                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5))
-                    .foregroundStyle(DesignSystem.Colors.border)
-                AxisValueLabel()
-                    .font(DesignSystem.Typography.caption)
-                    .foregroundStyle(DesignSystem.Colors.textSecondary)
-            }
-        }
-        .frame(minHeight: 160)
+        .frame(minHeight: 160, alignment: .top)
     }
 
-    // MARK: - Overload Badge
+    private func workloadRow(_ point: WorkloadDataPoint, maxValue: Int) -> some View {
+        HStack(spacing: DesignSystem.Spacing.spacing10) {
+            Text(point.member.displayName)
+                .font(DesignSystem.Typography.captionMedium)
+                .foregroundStyle(DesignSystem.Colors.textSecondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(width: 180, alignment: .leading)
 
-    private var overloadBadge: some View {
-        Image(systemName: "exclamationmark.triangle.fill")
-            .font(.system(size: 10))
-            .foregroundStyle(DesignSystem.Colors.danger)
+            GeometryReader { geometry in
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(DesignSystem.Colors.background)
+
+                    Capsule()
+                        .fill(point.isOverloaded ? DesignSystem.Colors.danger.opacity(0.75) : DesignSystem.Colors.accent.opacity(0.75))
+                        .frame(width: max(8, geometry.size.width * CGFloat(point.assignedStoryPoints) / CGFloat(maxValue)))
+
+                    Rectangle()
+                        .fill(DesignSystem.Colors.danger.opacity(0.8))
+                        .frame(width: 1, height: 14)
+                        .offset(x: min(geometry.size.width - 1, geometry.size.width * CGFloat(threshold) / CGFloat(maxValue)))
+                }
+            }
+            .frame(height: 9)
+
+            Text("\(point.assignedStoryPoints) SP")
+                .font(DesignSystem.Typography.captionMedium)
+                .foregroundStyle(point.isOverloaded ? DesignSystem.Colors.danger : DesignSystem.Colors.textPrimary)
+                .frame(width: 54, alignment: .trailing)
+        }
     }
 
     // MARK: - Legend

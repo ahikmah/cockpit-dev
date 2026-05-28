@@ -4,7 +4,7 @@ import SwiftData
 
 /// Performance tests verifying that key UI operations meet performance requirements.
 /// Uses XCTest measure blocks to ensure consistent performance.
-final class PerformanceTests: XCTestCase {
+final class PerformanceTests: CockpitDevTestCase {
 
     private var modelContainer: ModelContainer!
     private var modelContext: ModelContext!
