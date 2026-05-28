@@ -53,51 +53,47 @@ struct CycleTimeView: View {
     // MARK: - Chart
 
     private var chart: some View {
-        Chart {
+        VStack(spacing: DesignSystem.Spacing.spacing8) {
             ForEach(data) { point in
-                BarMark(
-                    x: .value("Member", point.label),
-                    y: .value("Days", point.averageDays)
-                )
-                .foregroundStyle(
-                    LinearGradient(
-                        colors: [Color(red: 0.2, green: 0.8, blue: 0.6), Color(red: 0.2, green: 0.8, blue: 0.6).opacity(0.6)],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                )
-                .cornerRadius(4)
+                cycleRow(point, maxValue: max(data.map(\.averageDays).max() ?? 1, workspaceAverage, 1))
             }
+        }
+        .frame(minHeight: 160, alignment: .top)
+    }
 
-            // Workspace average line
-            if workspaceAverage > 0 {
-                RuleMark(y: .value("Average", workspaceAverage))
-                    .foregroundStyle(DesignSystem.Colors.warning.opacity(0.8))
-                    .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [5, 3]))
-                    .annotation(position: .trailing, alignment: .leading) {
-                        Text("avg")
-                            .font(DesignSystem.Typography.caption)
-                            .foregroundStyle(DesignSystem.Colors.warning)
+    private func cycleRow(_ point: CycleTimeDataPoint, maxValue: Double) -> some View {
+        HStack(spacing: DesignSystem.Spacing.spacing10) {
+            Text(point.label)
+                .font(DesignSystem.Typography.captionMedium)
+                .foregroundStyle(DesignSystem.Colors.textSecondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(width: 180, alignment: .leading)
+
+            GeometryReader { geometry in
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(DesignSystem.Colors.background)
+
+                    Capsule()
+                        .fill(Color(red: 0.2, green: 0.8, blue: 0.6).opacity(0.72))
+                        .frame(width: max(8, geometry.size.width * point.averageDays / maxValue))
+
+                    if workspaceAverage > 0 {
+                        Rectangle()
+                            .fill(DesignSystem.Colors.warning.opacity(0.85))
+                            .frame(width: 1, height: 14)
+                            .offset(x: min(geometry.size.width - 1, geometry.size.width * workspaceAverage / maxValue))
                     }
+                }
             }
+            .frame(height: 9)
+
+            Text("\(String(format: "%.1f", point.averageDays))d")
+                .font(DesignSystem.Typography.captionMedium)
+                .foregroundStyle(DesignSystem.Colors.textPrimary)
+                .frame(width: 54, alignment: .trailing)
         }
-        .chartXAxis {
-            AxisMarks(values: .automatic) { _ in
-                AxisValueLabel()
-                    .font(DesignSystem.Typography.caption)
-                    .foregroundStyle(DesignSystem.Colors.textSecondary)
-            }
-        }
-        .chartYAxis {
-            AxisMarks(position: .leading) { _ in
-                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5))
-                    .foregroundStyle(DesignSystem.Colors.border)
-                AxisValueLabel()
-                    .font(DesignSystem.Typography.caption)
-                    .foregroundStyle(DesignSystem.Colors.textSecondary)
-            }
-        }
-        .frame(minHeight: 160)
     }
 
     // MARK: - Empty State

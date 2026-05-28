@@ -42,6 +42,48 @@ struct ContributionDataPoint: Identifiable {
     let reviewComments: Int
 }
 
+/// Per-developer delivery performance based on planning metadata and realized closures.
+struct DeveloperPerformanceDataPoint: Identifiable {
+    let id = UUID()
+    let member: Member
+    let plannedTickets: Int
+    let completedTickets: Int
+    let committedStoryPoints: Int
+    let completedStoryPoints: Int
+    let openStoryPoints: Int
+    let averageRealizationDays: Double?
+    let onTimeRate: Double?
+    let averageScheduleVarianceDays: Double?
+
+    var completionRate: Double {
+        guard plannedTickets > 0 else { return 0 }
+        return Double(completedTickets) / Double(plannedTickets)
+    }
+}
+
+/// Ticket closures grouped by day for realized delivery trend.
+struct ClosureTrendDataPoint: Identifiable {
+    let id = UUID()
+    let date: Date
+    let ticketsClosed: Int
+    let storyPointsClosed: Int
+}
+
+/// Deadline risk item for tickets that missed due date or have a lead-approved exception.
+struct DeadlineRiskDataPoint: Identifiable {
+    let id = UUID()
+    let ticket: Ticket
+    let title: String
+    let assigneeName: String
+    let dueDate: Date
+    let closedAt: Date?
+    let daysLate: Int
+    let storyPoints: Int
+    let isOpen: Bool
+    let appealStatus: DeadlineAppealStatus
+    let appealReason: String?
+}
+
 // MARK: - Analytics Filter
 
 /// Filter state for the analytics dashboard.
@@ -67,7 +109,17 @@ class AnalyticsViewModel {
     var cycleTimeData: [CycleTimeDataPoint] = []
     var throughputData: [ThroughputDataPoint] = []
     var contributionData: [ContributionDataPoint] = []
+    var developerPerformanceData: [DeveloperPerformanceDataPoint] = []
+    var closureTrendData: [ClosureTrendDataPoint] = []
+    var deadlineRiskData: [DeadlineRiskDataPoint] = []
     var workspaceCycleTime: Double = 0.0
+    var plannedStoryPoints: Int = 0
+    var completedStoryPoints: Int = 0
+    var openStoryPoints: Int = 0
+    var lateTicketCount: Int = 0
+    var approvedDeadlineExceptionCount: Int = 0
+    var averageScheduleVarianceDays: Double?
+    var onTimeCompletionRate: Double?
 
     var filter = AnalyticsFilter()
     var availableSprints: [Sprint] = []
@@ -75,7 +127,7 @@ class AnalyticsViewModel {
     var availableLabels: [String] = []
 
     var hasData: Bool {
-        !velocityData.isEmpty || !workloadData.isEmpty || !throughputData.isEmpty
+        !velocityData.isEmpty || !workloadData.isEmpty || !throughputData.isEmpty || !developerPerformanceData.isEmpty
     }
 
     // MARK: - Private
@@ -125,6 +177,10 @@ class AnalyticsViewModel {
         computeCycleTime()
         computeThroughput()
         computeContributions()
+        computeDeveloperPerformance()
+        computeClosureTrend()
+        computeDeadlineRisks()
+        computeSummaryMetrics()
     }
 
     // MARK: - Velocity (Req 13.2)
@@ -300,6 +356,165 @@ class AnalyticsViewModel {
         }.sorted { $0.ticketsCompleted > $1.ticketsCompleted }
     }
 
+    // MARK: - Developer Performance
+
+    private func computeDeveloperPerformance() {
+        guard let workspace else {
+            developerPerformanceData = []
+            return
+        }
+
+        let members = filteredMembers(from: workspace)
+        let tickets = filteredTickets(from: workspace)
+
+        developerPerformanceData = members.map { member in
+            let memberTickets = tickets.filter { $0.assignee?.id == member.id }
+            let completedTickets = memberTickets.filter { $0.status == .done }
+            let accountableCompletedTickets = completedTickets.filter { $0.deadlineAppealStatus != .approved }
+            let committedSP = memberTickets.compactMap(\.storyPoints).reduce(0, +)
+            let completedSP = completedTickets.compactMap(\.storyPoints).reduce(0, +)
+            let openSP = memberTickets
+                .filter { $0.status != .done }
+                .compactMap(\.storyPoints)
+                .reduce(0, +)
+
+            let realizationDays = completedTickets.compactMap(realizationDays(for:))
+            let variances = accountableCompletedTickets.compactMap(scheduleVarianceDays(for:))
+            let ticketsWithDueDate = accountableCompletedTickets.filter { $0.endDate != nil }
+            let onTimeCount = ticketsWithDueDate.filter(isCompletedOnTime).count
+
+            return DeveloperPerformanceDataPoint(
+                member: member,
+                plannedTickets: memberTickets.count,
+                completedTickets: completedTickets.count,
+                committedStoryPoints: committedSP,
+                completedStoryPoints: completedSP,
+                openStoryPoints: openSP,
+                averageRealizationDays: average(realizationDays),
+                onTimeRate: ticketsWithDueDate.isEmpty ? nil : Double(onTimeCount) / Double(ticketsWithDueDate.count),
+                averageScheduleVarianceDays: average(variances)
+            )
+        }
+        .filter { $0.plannedTickets > 0 || $0.committedStoryPoints > 0 }
+        .sorted {
+            if $0.completedStoryPoints == $1.completedStoryPoints {
+                return $0.committedStoryPoints > $1.committedStoryPoints
+            }
+            return $0.completedStoryPoints > $1.completedStoryPoints
+        }
+    }
+
+    private func computeClosureTrend() {
+        guard let workspace else {
+            closureTrendData = []
+            return
+        }
+
+        let calendar = Calendar.current
+        let closedTickets = filteredTickets(from: workspace)
+            .filter { $0.status == .done }
+
+        let grouped = Dictionary(grouping: closedTickets) { ticket in
+            calendar.startOfDay(for: completionDate(for: ticket))
+        }
+
+        closureTrendData = grouped
+            .map { date, tickets in
+                ClosureTrendDataPoint(
+                    date: date,
+                    ticketsClosed: tickets.count,
+                    storyPointsClosed: tickets.compactMap(\.storyPoints).reduce(0, +)
+                )
+            }
+            .sorted { $0.date < $1.date }
+    }
+
+    private func computeDeadlineRisks() {
+        guard let workspace else {
+            deadlineRiskData = []
+            lateTicketCount = 0
+            approvedDeadlineExceptionCount = 0
+            return
+        }
+
+        deadlineRiskData = filteredTickets(from: workspace)
+            .compactMap { ticket in
+                guard let dueDate = ticket.endDate else { return nil }
+                let lateDays = daysLate(for: ticket, dueDate: dueDate)
+                let hasApprovedException = ticket.deadlineAppealStatus == .approved
+                guard lateDays > 0 || hasApprovedException else { return nil }
+
+                return DeadlineRiskDataPoint(
+                    ticket: ticket,
+                    title: ticket.title,
+                    assigneeName: ticket.assignee?.displayName ?? "Unassigned",
+                    dueDate: dueDate,
+                    closedAt: ticket.status == .done ? completionDate(for: ticket) : nil,
+                    daysLate: lateDays,
+                    storyPoints: ticket.storyPoints ?? 0,
+                    isOpen: ticket.status != .done,
+                    appealStatus: ticket.deadlineAppealStatus,
+                    appealReason: ticket.deadlineAppealReason
+                )
+            }
+            .sorted {
+                if $0.appealStatus == $1.appealStatus {
+                    if $0.daysLate == $1.daysLate {
+                        return $0.dueDate < $1.dueDate
+                    }
+                    return $0.daysLate > $1.daysLate
+                }
+                return $0.appealStatus != .approved && $1.appealStatus == .approved
+            }
+
+        lateTicketCount = deadlineRiskData.filter { $0.appealStatus != .approved }.count
+        approvedDeadlineExceptionCount = deadlineRiskData.filter { $0.appealStatus == .approved }.count
+    }
+
+    private func computeSummaryMetrics() {
+        guard let workspace else {
+            plannedStoryPoints = 0
+            completedStoryPoints = 0
+            openStoryPoints = 0
+            averageScheduleVarianceDays = nil
+            onTimeCompletionRate = nil
+            return
+        }
+
+        let tickets = filteredTickets(from: workspace)
+        let completedTickets = tickets.filter { $0.status == .done }
+        let accountableCompletedTickets = completedTickets.filter { $0.deadlineAppealStatus != .approved }
+        plannedStoryPoints = tickets.compactMap(\.storyPoints).reduce(0, +)
+        completedStoryPoints = completedTickets.compactMap(\.storyPoints).reduce(0, +)
+        openStoryPoints = tickets.filter { $0.status != .done }.compactMap(\.storyPoints).reduce(0, +)
+        averageScheduleVarianceDays = average(accountableCompletedTickets.compactMap(scheduleVarianceDays(for:)))
+
+        let completedWithDueDate = accountableCompletedTickets.filter { $0.endDate != nil }
+        if completedWithDueDate.isEmpty {
+            onTimeCompletionRate = nil
+        } else {
+            let onTimeCount = completedWithDueDate.filter(isCompletedOnTime).count
+            onTimeCompletionRate = Double(onTimeCount) / Double(completedWithDueDate.count)
+        }
+    }
+
+    func approveDeadlineException(for ticket: Ticket, reason: String = "Lead-approved reprioritization") {
+        ticket.deadlineAppealStatus = .approved
+        ticket.deadlineAppealReason = reason
+        ticket.deadlineAppealDecidedAt = Date()
+        ticket.deadlineAppealDecidedBy = "Lead"
+        try? modelContext?.save()
+        computeAllMetrics()
+    }
+
+    func rejectDeadlineException(for ticket: Ticket) {
+        ticket.deadlineAppealStatus = .rejected
+        ticket.deadlineAppealDecidedAt = Date()
+        ticket.deadlineAppealDecidedBy = "Lead"
+        try? modelContext?.save()
+        computeAllMetrics()
+    }
+
     // MARK: - Helpers
 
     /// Fetches MergeRequestEntries associated with the workspace's repositories.
@@ -364,6 +579,13 @@ class AnalyticsViewModel {
         return tickets
     }
 
+    private func filteredMembers(from workspace: Workspace) -> [Member] {
+        if let selectedMember = filter.selectedMember {
+            return [selectedMember]
+        }
+        return workspace.members.sorted { $0.displayName < $1.displayName }
+    }
+
     /// Returns tickets for a specific sprint, applying label filter if set.
     private func ticketsForSprint(_ sprint: Sprint) -> [Ticket] {
         var tickets = sprint.tickets
@@ -401,12 +623,58 @@ class AnalyticsViewModel {
             startTime = ticket.createdAt
         }
 
-        let endTime = ticket.updatedAt
+        let endTime = completionDate(for: ticket)
         let interval = endTime.timeIntervalSince(startTime)
 
         // Only count positive intervals (ticket was updated after creation/start)
         guard interval > 0 else { return nil }
 
         return interval / (60 * 60 * 24) // Convert to days
+    }
+
+    private func realizationDays(for ticket: Ticket) -> Double? {
+        guard ticket.status == .done else { return nil }
+        let start = ticket.startDate ?? ticket.createdAt
+        let interval = completionDate(for: ticket).timeIntervalSince(start)
+        guard interval >= 0 else { return nil }
+        return max(interval / 86_400, 0.1)
+    }
+
+    private func scheduleVarianceDays(for ticket: Ticket) -> Double? {
+        guard ticket.status == .done, let endDate = ticket.endDate else { return nil }
+        let calendar = Calendar.current
+        let closedDay = calendar.startOfDay(for: completionDate(for: ticket))
+        let dueDay = calendar.startOfDay(for: endDate)
+        return Double(calendar.dateComponents([.day], from: dueDay, to: closedDay).day ?? 0)
+    }
+
+    private func isCompletedOnTime(_ ticket: Ticket) -> Bool {
+        guard ticket.status == .done, let endDate = ticket.endDate else { return false }
+        return completionDate(for: ticket) <= dueDateCutoff(for: endDate)
+    }
+
+    private func daysLate(for ticket: Ticket, dueDate: Date) -> Int {
+        let reference = ticket.status == .done ? completionDate(for: ticket) : Date()
+        let cutoff = dueDateCutoff(for: dueDate)
+        guard reference > cutoff else { return 0 }
+        let calendar = Calendar.current
+        let from = calendar.startOfDay(for: cutoff)
+        let to = calendar.startOfDay(for: reference)
+        return max(1, calendar.dateComponents([.day], from: from, to: to).day ?? 1)
+    }
+
+    private func dueDateCutoff(for date: Date) -> Date {
+        let calendar = Calendar.current
+        let startOfDueDate = calendar.startOfDay(for: date)
+        return calendar.date(byAdding: DateComponents(day: 1, second: -1), to: startOfDueDate) ?? date
+    }
+
+    private func completionDate(for ticket: Ticket) -> Date {
+        ticket.realizedAt ?? ticket.updatedAt
+    }
+
+    private func average(_ values: [Double]) -> Double? {
+        guard !values.isEmpty else { return nil }
+        return values.reduce(0, +) / Double(values.count)
     }
 }

@@ -3,7 +3,7 @@ import SwiftData
 @testable import CockpitDev
 
 @MainActor
-final class TicketManagementViewModelTests: XCTestCase {
+final class TicketManagementViewModelTests: CockpitDevTestCase {
 
     private var viewModel: TicketManagementViewModel!
     private var modelContext: ModelContext!
@@ -54,19 +54,24 @@ final class TicketManagementViewModelTests: XCTestCase {
         }
     }
 
-    func testValidateStoryPoints_invalidValues() {
-        let invalidValues = [0, 4, 6, 7, 9, 10, 11, 14, 15, 20, 22, 100]
+    func testValidateStoryPoints_allowsPositiveExternalWeights() {
+        let externalWeights = [4, 6, 7, 9, 10, 11, 14, 15, 20, 22, 25, 100]
+        for value in externalWeights {
+            XCTAssertNil(viewModel.validateStoryPoints(value), "External GitLab weight \(value) should be valid")
+        }
+    }
+
+    func testValidateStoryPoints_rejectsNonPositiveValues() {
+        let invalidValues = [-3, -1, 0]
         for value in invalidValues {
             XCTAssertNotNil(viewModel.validateStoryPoints(value), "Value \(value) should be invalid")
         }
     }
 
-    func testValidateStoryPoints_errorMessageContainsFibonacciValues() {
-        let error = viewModel.validateStoryPoints(4)
+    func testValidateStoryPoints_errorMessageExplainsPositiveValues() {
+        let error = viewModel.validateStoryPoints(0)
         XCTAssertNotNil(error)
-        XCTAssertTrue(error!.contains("Fibonacci"))
-        XCTAssertTrue(error!.contains("1"))
-        XCTAssertTrue(error!.contains("21"))
+        XCTAssertTrue(error!.contains("positive"))
     }
 
     // MARK: - Non-Standard SP Indicator Tests
@@ -109,6 +114,29 @@ final class TicketManagementViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.tickets.first?.localVersion, 1)
     }
 
+    func testCreateTicketAssignsDefaultSprint() {
+        let sprint = Sprint(name: "Sprint 1", startDate: Date(), endDate: Date().addingTimeInterval(86_400))
+        sprint.workspace = workspace
+        workspace.sprints.append(sprint)
+        modelContext.insert(sprint)
+
+        let result = viewModel.createTicket(
+            title: "Sprint ticket",
+            description: nil,
+            priority: nil,
+            storyPoints: 3,
+            labels: [],
+            assignee: nil,
+            sprint: sprint,
+            startDate: nil,
+            endDate: nil
+        )
+
+        XCTAssertTrue(result)
+        XCTAssertEqual(viewModel.tickets.first?.sprint?.id, sprint.id)
+        XCTAssertTrue(sprint.tickets.contains { $0.title == "Sprint ticket" })
+    }
+
     func testCreateTicket_emptyTitle_fails() {
         let result = viewModel.createTicket(
             title: "",
@@ -143,12 +171,12 @@ final class TicketManagementViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.tickets.count, 0)
     }
 
-    func testCreateTicket_invalidStoryPoints_fails() {
+    func testCreateTicket_nonPositiveStoryPoints_fails() {
         let result = viewModel.createTicket(
             title: "Test Ticket",
             description: nil,
             priority: nil,
-            storyPoints: 4, // Not Fibonacci
+            storyPoints: 0,
             labels: [],
             assignee: nil,
             startDate: nil,
@@ -276,11 +304,10 @@ final class TicketManagementViewModelTests: XCTestCase {
             return
         }
 
-        viewModel.updateTicket(ticket, storyPoints: 4)
+        viewModel.updateTicket(ticket, storyPoints: 25)
 
-        // Story points should not have changed
-        XCTAssertEqual(ticket.storyPoints, 5)
-        XCTAssertTrue(viewModel.showError)
+        XCTAssertEqual(ticket.storyPoints, 25)
+        XCTAssertFalse(viewModel.showError)
     }
 
     func testUpdateTicket_emptyTitle_showsError() {

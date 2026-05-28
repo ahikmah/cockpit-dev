@@ -11,7 +11,7 @@ import XCTest
 /// - Batch clone with partial failure handling
 /// - Missing repo detection
 @MainActor
-final class IDEContextServiceTests: XCTestCase {
+final class IDEContextServiceTests: CockpitDevTestCase {
 
     private var service: IDEContextService!
     private var gitOpsService: GitOperationsService!
@@ -323,7 +323,7 @@ final class IDEContextServiceTests: XCTestCase {
         let repo = Repository(gitlabProjectId: 1, name: "progress-repo", url: bareRepoURL.absoluteString, localPath: nil)
 
         let baseDir = tempDir.appendingPathComponent("clones")
-        var progressUpdates: [(String, CloneProgress)] = []
+        let progressUpdates = LockedRecorder<(String, CloneProgress)>()
 
         let results = await service.cloneMissingRepos(
             repos: [repo],
@@ -388,6 +388,35 @@ final class IDEContextServiceTests: XCTestCase {
         } catch {
             XCTFail("Unexpected error type: \(error)")
         }
+    }
+
+    func testOpenInIDE_launchesWorkspaceRootInZed() async throws {
+        let rootDirectory = tempDir.appendingPathComponent("workspace-root")
+        let repoDirectory = rootDirectory.appendingPathComponent("repo")
+        try FileManager.default.createDirectory(at: repoDirectory, withIntermediateDirectories: true)
+
+        let workspace = Workspace(name: "Test", localRootPath: rootDirectory.path)
+        let repo = Repository(
+            gitlabProjectId: 1,
+            name: "repo",
+            url: "https://gitlab.com/test/repo.git",
+            localPath: repoDirectory.path
+        )
+        workspace.repositories = [repo]
+
+        var launchedDirectory: URL?
+        let launchService = IDEContextService(
+            gitOperationsService: gitOpsService,
+            fileManager: .default,
+            zedLauncher: { directory in
+                launchedDirectory = directory
+                return true
+            }
+        )
+
+        try await launchService.openInIDE(workspace: workspace)
+
+        XCTAssertEqual(launchedDirectory?.standardizedFileURL.path, rootDirectory.standardizedFileURL.path)
     }
 
     // MARK: - RepositoryAvailability Tests

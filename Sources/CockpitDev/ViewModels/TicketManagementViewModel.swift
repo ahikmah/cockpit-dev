@@ -106,6 +106,7 @@ class TicketManagementViewModel {
         storyPoints: Int?,
         labels: [String],
         assignee: Member?,
+        sprint: Sprint? = nil,
         startDate: Date?,
         endDate: Date?
     ) -> Bool {
@@ -143,7 +144,9 @@ class TicketManagementViewModel {
             localVersion: 1
         )
         ticket.assignee = assignee
+        ticket.sprint = sprint
         ticket.workspace = workspace
+        sprint?.tickets.append(ticket)
 
         modelContext.insert(ticket)
 
@@ -353,12 +356,12 @@ class TicketManagementViewModel {
 
     // MARK: - Validation
 
-    /// Validates that a story points value is in the Fibonacci sequence.
+    /// Validates that a story points value is positive.
     /// - Parameter value: The story points value to validate.
     /// - Returns: An error message if invalid, or `nil` if valid.
     func validateStoryPoints(_ value: Int) -> String? {
-        guard AppConstants.fibonacciSequence.contains(value) else {
-            return "Story points must be a Fibonacci value: \(AppConstants.fibonacciSequence.map(String.init).joined(separator: ", "))."
+        guard value > 0 else {
+            return "Story points must be a positive value."
         }
         return nil
     }

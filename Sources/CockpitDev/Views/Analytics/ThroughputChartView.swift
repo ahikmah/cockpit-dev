@@ -53,55 +53,40 @@ struct ThroughputChartView: View {
     // MARK: - Chart
 
     private var chart: some View {
-        Chart(data) { point in
-            LineMark(
-                x: .value("Sprint", point.sprintName),
-                y: .value("Tickets", point.ticketsCompleted)
-            )
-            .foregroundStyle(Color(red: 0.56, green: 0.35, blue: 0.97))
-            .lineStyle(StrokeStyle(lineWidth: 2))
-            .interpolationMethod(.catmullRom)
-
-            AreaMark(
-                x: .value("Sprint", point.sprintName),
-                y: .value("Tickets", point.ticketsCompleted)
-            )
-            .foregroundStyle(
-                LinearGradient(
-                    colors: [
-                        Color(red: 0.56, green: 0.35, blue: 0.97).opacity(0.15),
-                        Color(red: 0.56, green: 0.35, blue: 0.97).opacity(0.02)
-                    ],
-                    startPoint: .top,
-                    endPoint: .bottom
+        VStack(spacing: DesignSystem.Spacing.spacing8) {
+            ForEach(data) { point in
+                metricRow(
+                    label: point.sprintName,
+                    value: point.ticketsCompleted,
+                    maxValue: max(data.map(\.ticketsCompleted).max() ?? 1, 1),
+                    color: Color(red: 0.56, green: 0.35, blue: 0.97)
                 )
-            )
-            .interpolationMethod(.catmullRom)
+            }
+        }
+        .frame(minHeight: 160, alignment: .top)
+    }
 
-            PointMark(
-                x: .value("Sprint", point.sprintName),
-                y: .value("Tickets", point.ticketsCompleted)
-            )
-            .foregroundStyle(Color(red: 0.56, green: 0.35, blue: 0.97))
-            .symbolSize(30)
-        }
-        .chartXAxis {
-            AxisMarks(values: .automatic) { _ in
-                AxisValueLabel()
-                    .font(DesignSystem.Typography.caption)
-                    .foregroundStyle(DesignSystem.Colors.textSecondary)
+    private func metricRow(label: String, value: Int, maxValue: Int, color: Color) -> some View {
+        HStack(spacing: DesignSystem.Spacing.spacing10) {
+            Text(label)
+                .font(DesignSystem.Typography.captionMedium)
+                .foregroundStyle(DesignSystem.Colors.textSecondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(width: 180, alignment: .leading)
+
+            GeometryReader { geometry in
+                Capsule()
+                    .fill(color.opacity(0.72))
+                    .frame(width: max(8, geometry.size.width * CGFloat(value) / CGFloat(maxValue)))
             }
+            .frame(height: 9)
+
+            Text("\(value)")
+                .font(DesignSystem.Typography.captionMedium)
+                .foregroundStyle(DesignSystem.Colors.textPrimary)
+                .frame(width: 38, alignment: .trailing)
         }
-        .chartYAxis {
-            AxisMarks(position: .leading) { _ in
-                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5))
-                    .foregroundStyle(DesignSystem.Colors.border)
-                AxisValueLabel()
-                    .font(DesignSystem.Typography.caption)
-                    .foregroundStyle(DesignSystem.Colors.textSecondary)
-            }
-        }
-        .frame(minHeight: 160)
     }
 
     // MARK: - Empty State

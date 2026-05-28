@@ -53,37 +53,40 @@ struct VelocityChartView: View {
     // MARK: - Chart
 
     private var chart: some View {
-        Chart(data) { point in
-            BarMark(
-                x: .value("Sprint", point.sprintName),
-                y: .value("Story Points", point.completedStoryPoints)
-            )
-            .foregroundStyle(
-                LinearGradient(
-                    colors: [DesignSystem.Colors.accent, DesignSystem.Colors.accent.opacity(0.7)],
-                    startPoint: .top,
-                    endPoint: .bottom
+        VStack(spacing: DesignSystem.Spacing.spacing8) {
+            ForEach(data) { point in
+                metricRow(
+                    label: point.sprintName,
+                    value: point.completedStoryPoints,
+                    maxValue: max(data.map(\.completedStoryPoints).max() ?? 1, 1),
+                    color: DesignSystem.Colors.accent
                 )
-            )
-            .cornerRadius(4)
-        }
-        .chartXAxis {
-            AxisMarks(values: .automatic) { _ in
-                AxisValueLabel()
-                    .font(DesignSystem.Typography.caption)
-                    .foregroundStyle(DesignSystem.Colors.textSecondary)
             }
         }
-        .chartYAxis {
-            AxisMarks(position: .leading) { _ in
-                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5))
-                    .foregroundStyle(DesignSystem.Colors.border)
-                AxisValueLabel()
-                    .font(DesignSystem.Typography.caption)
-                    .foregroundStyle(DesignSystem.Colors.textSecondary)
+        .frame(minHeight: 160, alignment: .top)
+    }
+
+    private func metricRow(label: String, value: Int, maxValue: Int, color: Color) -> some View {
+        HStack(spacing: DesignSystem.Spacing.spacing10) {
+            Text(label)
+                .font(DesignSystem.Typography.captionMedium)
+                .foregroundStyle(DesignSystem.Colors.textSecondary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .frame(width: 180, alignment: .leading)
+
+            GeometryReader { geometry in
+                Capsule()
+                    .fill(color.opacity(0.72))
+                    .frame(width: max(8, geometry.size.width * CGFloat(value) / CGFloat(maxValue)))
             }
+            .frame(height: 9)
+
+            Text("\(value) SP")
+                .font(DesignSystem.Typography.captionMedium)
+                .foregroundStyle(DesignSystem.Colors.textPrimary)
+                .frame(width: 54, alignment: .trailing)
         }
-        .frame(minHeight: 160)
     }
 
     // MARK: - Empty State

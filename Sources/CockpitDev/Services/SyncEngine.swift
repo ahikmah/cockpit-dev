@@ -26,6 +26,20 @@ enum SyncResult: Equatable {
     }
 }
 
+private extension Ticket {
+    func matchesGitLabIssue(id remoteId: Int, iid remoteIid: Int) -> Bool {
+        if let gitlabIssueIid {
+            return gitlabIssueIid == remoteIid
+        }
+
+        guard let gitlabIssueId else {
+            return false
+        }
+
+        return gitlabIssueId == remoteId || gitlabIssueId == remoteIid
+    }
+}
+
 // MARK: - Ticket Snapshot
 
 /// An immutable snapshot of a ticket's state for conflict resolution.
@@ -211,18 +225,6 @@ enum FieldMapping {
         }
         return labels
     }
-
-    // MARK: - Story Points to Weight
-
-    /// Maps story points to GitLab weight (direct 1:1 mapping).
-    static func storyPointsToWeight(_ storyPoints: Int?) -> Int? {
-        return storyPoints
-    }
-
-    /// Maps GitLab weight to story points (direct 1:1 mapping).
-    static func weightToStoryPoints(_ weight: Int?) -> Int? {
-        return weight
-    }
 }
 
 // MARK: - SyncEngine
@@ -237,6 +239,7 @@ enum FieldMapping {
 /// - Conflict detection using localVersion counter and lastSyncedAt timestamp
 /// - Offline queue with retry on connectivity return
 @Observable
+@MainActor
 class SyncEngine {
 
     // MARK: - Properties
@@ -256,6 +259,9 @@ class SyncEngine {
     /// The GitLab API client for making requests.
     private let apiClient: GitLabAPIClient
 
+    /// The OpenSpec PM metadata source for DB-owned planning fields.
+    private let planningMetadataProvider: OpenSpecPMMetadataProviding?
+
     /// The SwiftData model context for persistence.
     private let modelContext: ModelContext
 
@@ -272,15 +278,16 @@ class SyncEngine {
     ///   - apiClient: The GitLab API client for remote operations.
     ///   - modelContext: The SwiftData model context for local persistence.
     ///   - pollingInterval: The interval between polling cycles (default: 5 minutes).
-    init(apiClient: GitLabAPIClient, modelContext: ModelContext, pollingInterval: TimeInterval = AppConstants.defaultPollInterval) {
+    init(
+        apiClient: GitLabAPIClient,
+        planningMetadataProvider: OpenSpecPMMetadataProviding? = nil,
+        modelContext: ModelContext,
+        pollingInterval: TimeInterval = AppConstants.defaultPollInterval
+    ) {
         self.apiClient = apiClient
+        self.planningMetadataProvider = planningMetadataProvider
         self.modelContext = modelContext
         self.pollingInterval = pollingInterval
-    }
-
-    deinit {
-        pollingTask?.cancel()
-        offlineRetryTask?.cancel()
     }
 
     // MARK: - Push Operations
@@ -316,7 +323,8 @@ class SyncEngine {
                 fields.title = ticket.title
                 fields.description = ticket.descriptionText
                 fields.labels = labels
-                fields.weight = FieldMapping.storyPointsToWeight(ticket.storyPoints)
+                fields.assigneeIds = ticket.assignee.map { [$0.gitlabUserId] }
+                fields.milestoneId = ticket.sprint?.gitlabMilestoneId
                 if let stateEvent = stateEvent {
                     fields.stateEvent = stateEvent
                 }
@@ -331,8 +339,8 @@ class SyncEngine {
                     title: ticket.title,
                     description: ticket.descriptionText,
                     labels: labels,
-                    weight: FieldMapping.storyPointsToWeight(ticket.storyPoints),
-                    assigneeId: ticket.assignee?.gitlabUserId
+                    assigneeId: ticket.assignee?.gitlabUserId,
+                    milestoneId: ticket.sprint?.gitlabMilestoneId
                 )
 
                 // Associate the GitLab issue ID with the local ticket
@@ -434,7 +442,7 @@ class SyncEngine {
             title: remote.title,
             descriptionText: remote.description,
             status: remoteStatus,
-            storyPoints: FieldMapping.weightToStoryPoints(remote.weight),
+            storyPoints: local.storyPoints,
             labels: FieldMapping.nonWorkflowLabels(remote.labels),
             updatedAt: remote.updatedAt,
             localVersion: local.localVersion
@@ -500,59 +508,63 @@ class SyncEngine {
             throw SyncError.offlineQueued
         }
 
-        guard let repository = workspace.repositories.first else {
+        guard !workspace.repositories.isEmpty else {
             throw SyncError.noProjectId
         }
 
-        let projectId = repository.gitlabProjectId
         var results: [SyncResult] = []
 
         do {
-            // Fetch all issues from GitLab
-            let remoteIssues = try await apiClient.fetchIssues(projectId: projectId)
-            let localTickets = workspace.tickets
+            for repository in workspace.repositories {
+                let projectId = repository.gitlabProjectId
+                let milestoneLookup = try await upsertMilestones(projectId: projectId, workspace: workspace)
+                var ticketsByIssueIid: [Int: [Ticket]] = [:]
 
-            // Build lookup maps
-            let remoteByIid = Dictionary(uniqueKeysWithValues: remoteIssues.map { ($0.iid, $0) })
-            let localByIid = Dictionary(uniqueKeysWithValues:
-                localTickets.compactMap { ticket -> (Int, Ticket)? in
-                    guard let iid = ticket.gitlabIssueIid else { return nil }
-                    return (iid, ticket)
-                }
-            )
+                // Fetch all issues from GitLab
+                let remoteIssues = try await apiClient.fetchIssues(projectId: projectId)
 
-            // Reconcile tickets that exist on both sides
-            for (iid, localTicket) in localByIid {
-                if let remoteIssue = remoteByIid[iid] {
-                    let result = reconcile(local: localTicket, remote: remoteIssue)
-                    results.append(result)
+                var matchedRemoteIids = Set<Int>()
 
-                    // Auto-apply non-conflict results
-                    if case .noConflict(let merged) = result {
-                        applySnapshot(merged, to: localTicket)
-                        localTicket.lastSyncedAt = Date()
+                // Reconcile tickets that exist on both sides. Match primarily by IID because
+                // older local data may have stored GitLab IID in `gitlabIssueId`.
+                for remoteIssue in remoteIssues {
+                    let localTickets = workspace.tickets.filter { ticket in
+                        ticket.matchesGitLabIssue(id: remoteIssue.id, iid: remoteIssue.iid)
                     }
-                } else {
-                    // Local ticket exists but not on remote (may have been deleted)
-                    results.append(.localOnly(TicketSnapshot(from: localTicket)))
-                }
-            }
 
-            // Find remote-only issues (exist on GitLab but not locally)
-            let localIids = Set(localByIid.keys)
-            for (iid, remoteIssue) in remoteByIid where !localIids.contains(iid) {
-                let remoteStatus = FieldMapping.gitLabToStatus(state: remoteIssue.state, labels: remoteIssue.labels)
-                let snapshot = TicketSnapshot(
-                    gitlabIssueId: remoteIssue.id,
-                    gitlabIssueIid: remoteIssue.iid,
-                    title: remoteIssue.title,
-                    descriptionText: remoteIssue.description,
-                    status: remoteStatus,
-                    storyPoints: FieldMapping.weightToStoryPoints(remoteIssue.weight),
-                    labels: FieldMapping.nonWorkflowLabels(remoteIssue.labels),
-                    updatedAt: remoteIssue.updatedAt
+                    guard !localTickets.isEmpty else { continue }
+                    matchedRemoteIids.insert(remoteIssue.iid)
+
+                    for localTicket in localTickets {
+                        let result = reconcile(local: localTicket, remote: remoteIssue)
+                        results.append(result)
+
+                        // GitLab owns issue identity and collaboration state. Planning metadata
+                        // such as dates, estimates, and priority is owned by OpenSpec PM data.
+                        applyRemoteIssueMetadata(to: localTicket, from: remoteIssue, workspace: workspace, milestoneLookup: milestoneLookup)
+                        ticketsByIssueIid[remoteIssue.iid, default: []].append(localTicket)
+
+                        // Auto-apply non-conflict content fields.
+                        if case .noConflict(let merged) = result {
+                            applySnapshot(merged, to: localTicket)
+                            localTicket.lastSyncedAt = Date()
+                        }
+                    }
+                }
+
+                // Find remote-only issues, persist them locally, and still report them.
+                for remoteIssue in remoteIssues where !matchedRemoteIids.contains(remoteIssue.iid) {
+                    let ticket = createTicket(from: remoteIssue, workspace: workspace, milestoneLookup: milestoneLookup)
+                    ticketsByIssueIid[remoteIssue.iid, default: []].append(ticket)
+                    let snapshot = TicketSnapshot(from: ticket)
+                    results.append(.remoteOnly(snapshot))
+                }
+
+                try await refreshRealizationDates(
+                    projectId: projectId,
+                    remoteIssues: remoteIssues,
+                    ticketsByIssueIid: ticketsByIssueIid
                 )
-                results.append(.remoteOnly(snapshot))
             }
 
             try modelContext.save()
@@ -562,6 +574,18 @@ class SyncEngine {
         }
 
         return results
+    }
+
+    /// Refreshes timeline planning metadata directly from the OpenSpec PM database API.
+    func refreshPlanningMetadata(workspace: Workspace) async throws {
+        guard !workspace.repositories.isEmpty else {
+            throw SyncError.noProjectId
+        }
+
+        for repository in workspace.repositories {
+            try await applyPlanningMetadata(for: repository, workspace: workspace)
+        }
+        try modelContext.save()
     }
 
     // MARK: - Offline Queue
@@ -659,10 +683,457 @@ class SyncEngine {
         ticket.title = issue.title
         ticket.descriptionText = issue.description
         ticket.status = FieldMapping.gitLabToStatus(state: issue.state, labels: issue.labels)
-        ticket.storyPoints = FieldMapping.weightToStoryPoints(issue.weight)
         ticket.labels = FieldMapping.nonWorkflowLabels(issue.labels)
         ticket.updatedAt = issue.updatedAt
         ticket.localVersion += 1
+    }
+
+    /// Resolves actual ticket completion from the latest commit in merge requests that mention the issue.
+    private func refreshRealizationDates(
+        projectId: Int,
+        remoteIssues: [GitLabIssue],
+        ticketsByIssueIid: [Int: [Ticket]]
+    ) async throws {
+        guard !ticketsByIssueIid.isEmpty else { return }
+
+        let projectMergeRequests = (try? await apiClient.fetchMergeRequests(projectId: projectId, state: "all")) ?? []
+
+        let issueByIid = Dictionary(uniqueKeysWithValues: remoteIssues.map { ($0.iid, $0) })
+
+        for (issueIid, tickets) in ticketsByIssueIid {
+            let issueNotes = (try? await apiClient.fetchIssueNotes(projectId: projectId, issueIid: issueIid)) ?? []
+            let relatedMergeRequests = (try? await apiClient.fetchIssueRelatedMergeRequests(projectId: projectId, issueIid: issueIid)) ?? []
+            let mergeRequests = mergeRequestsForIssue(
+                issueIid: issueIid,
+                tickets: tickets,
+                relatedMergeRequests: relatedMergeRequests,
+                projectMergeRequests: projectMergeRequests
+            )
+            let latestMention = latestMergeRequestMention(in: issueNotes)
+
+            var latestCommit: GitLabCommit?
+            var latestCommitMRIid: Int?
+            var latestDate: Date?
+
+            for mr in mergeRequests {
+                let mrMentionsIssue = tickets.contains { ticket in
+                    mergeRequest(mr, mentions: ticket, issueIid: issueIid)
+                }
+                let mrMentionedInIssueTimeline = latestMention?.mrIid == mr.iid
+
+                let commits: [GitLabCommit]
+                do {
+                    commits = try await apiClient.fetchMRCommits(projectId: projectId, mrIid: mr.iid)
+                } catch {
+                    continue
+                }
+
+                let matchingCommits = commits.filter { commit in
+                    tickets.contains { ticket in
+                        commitMentions(ticket, issueIid: issueIid, commit: commit)
+                    }
+                }
+
+                let candidateCommits = matchingCommits.isEmpty && (mrMentionsIssue || mrMentionedInIssueTimeline) ? commits : matchingCommits
+                guard !candidateCommits.isEmpty else { continue }
+
+                for commit in candidateCommits {
+                    guard let commitDate = realizationDate(for: commit) else { continue }
+                    if latestDate.map({ commitDate > $0 }) ?? true {
+                        latestDate = commitDate
+                        latestCommit = commit
+                        latestCommitMRIid = mr.iid
+                    }
+                }
+            }
+
+            if let latestMention,
+               !mergeRequests.contains(where: { $0.iid == latestMention.mrIid }),
+               let commits = try? await apiClient.fetchMRCommits(projectId: projectId, mrIid: latestMention.mrIid) {
+                for commit in commits {
+                    guard let commitDate = realizationDate(for: commit) else { continue }
+                    if latestDate.map({ commitDate > $0 }) ?? true {
+                        latestDate = commitDate
+                        latestCommit = commit
+                        latestCommitMRIid = latestMention.mrIid
+                    }
+                }
+            }
+
+            for ticket in tickets {
+                if let latestDate, let latestCommit, let latestCommitMRIid {
+                    ticket.realizedAt = latestDate
+                    ticket.realizationSource = .mrCommit
+                    ticket.realizationReference = "!\(latestCommitMRIid) \(latestCommit.shortId)"
+                } else if let latestMention {
+                    ticket.realizedAt = latestMention.createdAt
+                    ticket.realizationSource = .mrMention
+                    ticket.realizationReference = "!\(latestMention.mrIid)"
+                } else if ticket.status == .done, let closedAt = issueByIid[issueIid]?.closedAt {
+                    ticket.realizedAt = closedAt
+                    ticket.realizationSource = .issueClosed
+                    ticket.realizationReference = "#\(issueIid)"
+                }
+            }
+        }
+    }
+
+    private struct MergeRequestMention {
+        let mrIid: Int
+        let createdAt: Date
+    }
+
+    private func latestMergeRequestMention(in notes: [GitLabNote]) -> MergeRequestMention? {
+        let pattern = #"\bmerge request !([0-9]+)\b"#
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return nil
+        }
+
+        return notes.compactMap { note in
+            let range = NSRange(note.body.startIndex..<note.body.endIndex, in: note.body)
+            guard let match = regex.firstMatch(in: note.body, range: range),
+                  let iidRange = Range(match.range(at: 1), in: note.body),
+                  let mrIid = Int(note.body[iidRange]) else {
+                return nil
+            }
+
+            return MergeRequestMention(mrIid: mrIid, createdAt: note.createdAt)
+        }.max { $0.createdAt < $1.createdAt }
+    }
+
+    private func mergeRequestsForIssue(
+        issueIid: Int,
+        tickets: [Ticket],
+        relatedMergeRequests: [GitLabMR],
+        projectMergeRequests: [GitLabMR]
+    ) -> [GitLabMR] {
+        var keyed: [Int: GitLabMR] = [:]
+        for mr in relatedMergeRequests {
+            keyed[mr.iid] = mr
+        }
+
+        for mr in projectMergeRequests where tickets.contains(where: { mergeRequest(mr, mentions: $0, issueIid: issueIid) }) {
+            keyed[mr.iid] = mr
+        }
+
+        return keyed.values.sorted { $0.iid < $1.iid }
+    }
+
+    private func mergeRequest(_ mr: GitLabMR, mentions ticket: Ticket, issueIid: Int) -> Bool {
+        let text = [
+            mr.title,
+            mr.description ?? "",
+            mr.sourceBranch,
+            mr.targetBranch
+        ].joined(separator: " ")
+
+        return textMentions(ticket, issueIid: issueIid, text: text)
+    }
+
+    private func commitMentions(_ ticket: Ticket, issueIid: Int, commit: GitLabCommit) -> Bool {
+        textMentions(ticket, issueIid: issueIid, text: "\(commit.title) \(commit.message)")
+    }
+
+    private func textMentions(_ ticket: Ticket, issueIid: Int, text: String) -> Bool {
+        let haystack = text.lowercased()
+        let directIssueTokens = [
+            "#\(issueIid)",
+            "issues/\(issueIid)",
+            "/-/issues/\(issueIid)"
+        ]
+
+        if directIssueTokens.contains(where: { haystack.contains($0.lowercased()) }) {
+            return true
+        }
+
+        return issueReferenceTokens(for: ticket).contains { token in
+            haystack.contains(token.lowercased())
+        }
+    }
+
+    private func issueReferenceTokens(for ticket: Ticket) -> [String] {
+        var tokens: [String] = []
+        if let branchName = ticket.branchName, !branchName.isEmpty {
+            tokens.append(branchName)
+        }
+
+        let pattern = #"\b[A-Z][A-Z0-9]+-\d+\b"#
+        if let regex = try? NSRegularExpression(pattern: pattern) {
+            let range = NSRange(ticket.title.startIndex..<ticket.title.endIndex, in: ticket.title)
+            for match in regex.matches(in: ticket.title, range: range) {
+                if let tokenRange = Range(match.range, in: ticket.title) {
+                    tokens.append(String(ticket.title[tokenRange]))
+                }
+            }
+        }
+
+        return Array(Set(tokens))
+    }
+
+    private func realizationDate(for commit: GitLabCommit) -> Date? {
+        commit.committedDate ?? commit.createdAt
+    }
+
+    /// Fetches GitLab milestones for a repository and upserts matching local sprints.
+    private func upsertMilestones(projectId: Int, workspace: Workspace) async throws -> [Int: Sprint] {
+        let milestones = try await apiClient.fetchMilestones(projectId: projectId)
+        var lookup: [Int: Sprint] = [:]
+
+        for milestone in milestones {
+            let sprint = workspace.sprints.first { $0.gitlabMilestoneId == milestone.id } ?? {
+                let dates = milestoneDateRange(for: milestone)
+                let sprint = Sprint(
+                    name: milestone.title,
+                    startDate: dates.start,
+                    endDate: dates.end,
+                    gitlabMilestoneId: milestone.id
+                )
+                sprint.workspace = workspace
+                workspace.sprints.append(sprint)
+                modelContext.insert(sprint)
+                return sprint
+            }()
+
+            let dates = milestoneDateRange(for: milestone)
+            sprint.name = milestone.title
+            sprint.startDate = dates.start
+            sprint.endDate = dates.end
+            sprint.gitlabMilestoneId = milestone.id
+            sprint.workspace = workspace
+            if !workspace.sprints.contains(where: { $0.id == sprint.id }) {
+                workspace.sprints.append(sprint)
+            }
+            lookup[milestone.id] = sprint
+        }
+
+        return lookup
+    }
+
+    /// Creates a local ticket from a GitLab issue and links collaboration metadata.
+    private func createTicket(from issue: GitLabIssue, workspace: Workspace, milestoneLookup: [Int: Sprint]) -> Ticket {
+        let ticket = Ticket(
+            gitlabIssueId: issue.id,
+            gitlabIssueIid: issue.iid,
+            title: issue.title,
+            descriptionText: issue.description,
+            status: FieldMapping.gitLabToStatus(state: issue.state, labels: issue.labels),
+            storyPoints: nil,
+            labels: FieldMapping.nonWorkflowLabels(issue.labels),
+            createdAt: issue.createdAt,
+            updatedAt: issue.updatedAt,
+            lastSyncedAt: Date(),
+            localVersion: 1
+        )
+
+        applyRemoteIssueMetadata(to: ticket, from: issue, workspace: workspace, milestoneLookup: milestoneLookup)
+        workspace.tickets.append(ticket)
+        modelContext.insert(ticket)
+        return ticket
+    }
+
+    /// Applies planning fields whose source of truth is the OpenSpec PM Feature database.
+    private func applyPlanningMetadata(for repository: Repository, workspace: Workspace) async throws {
+        guard let planningMetadataProvider else { return }
+
+        let features = try await planningMetadataProvider.fetchFeatures(repositoryURL: repository.url)
+        var ticketByFeatureId: [String: Ticket] = [:]
+
+        for feature in features {
+            guard let externalIssueId = feature.externalIssueId,
+                  let ticket = workspace.tickets.first(where: {
+                      $0.matchesGitLabIssue(id: externalIssueId, iid: externalIssueId)
+                  }) else {
+                continue
+            }
+            ticketByFeatureId[feature.id] = ticket
+
+            ticket.title = feature.title
+            ticket.status = feature.status.ticketStatus
+            ticket.priority = feature.priority.ticketPriority
+            ticket.storyPoints = feature.storyPoints
+            ticket.startDate = feature.startDate
+            ticket.endDate = feature.dueDate
+            ticket.branchName = feature.branchName
+
+            if let assignee = feature.assignee,
+               let member = workspace.members.first(where: { $0.username == assignee.username }) {
+                ticket.assignee = member
+            }
+
+            if let milestone = feature.milestone, !milestone.isEmpty {
+                let sprint = workspace.sprints.first(where: { $0.name == milestone }) ?? {
+                    let startDate = feature.startDate ?? Date()
+                    let endDate = feature.dueDate ?? startDate
+                    let sprint = Sprint(name: milestone, startDate: startDate, endDate: endDate)
+                    sprint.workspace = workspace
+                    workspace.sprints.append(sprint)
+                    modelContext.insert(sprint)
+                    return sprint
+                }()
+                if ticket.sprint?.id != sprint.id {
+                    ticket.sprint?.tickets.removeAll { $0.id == ticket.id }
+                    ticket.sprint = sprint
+                }
+                if !sprint.tickets.contains(where: { $0.id == ticket.id }) {
+                    sprint.tickets.append(ticket)
+                }
+            }
+        }
+
+        applyFeatureDependencies(features: features, ticketByFeatureId: ticketByFeatureId, workspace: workspace)
+    }
+
+    /// Applies dependency edges whose source of truth is the OpenSpec PM Feature database.
+    private func applyFeatureDependencies(
+        features: [OpenSpecPMFeature],
+        ticketByFeatureId: [String: Ticket],
+        workspace: Workspace
+    ) {
+        guard !ticketByFeatureId.isEmpty else { return }
+
+        var ticketByIssueId: [Int: Ticket] = [:]
+        var ticketByIssueIid: [Int: Ticket] = [:]
+        var ticketByKey: [String: Ticket] = [:]
+        for ticket in workspace.tickets {
+            if let issueId = ticket.gitlabIssueId {
+                ticketByIssueId[issueId] = ticket
+            }
+            if let issueIid = ticket.gitlabIssueIid {
+                ticketByIssueIid[issueIid] = ticket
+            }
+            if let key = ticketKey(from: ticket.title) {
+                ticketByKey[key] = ticket
+            }
+        }
+
+        for feature in features {
+            guard let ticket = ticketByFeatureId[feature.id] else { continue }
+
+            for blocker in ticket.blockedBy {
+                blocker.blocks.removeAll { $0.id == ticket.id }
+            }
+            ticket.blockedBy.removeAll()
+
+            let blockers = feature.dependencyReferences.compactMap { reference in
+                resolveFeatureDependency(
+                    reference,
+                    ticketByFeatureId: ticketByFeatureId,
+                    ticketByIssueId: ticketByIssueId,
+                    ticketByIssueIid: ticketByIssueIid,
+                    ticketByKey: ticketByKey
+                )
+            }
+
+            for blocker in blockers where blocker.id != ticket.id {
+                if !ticket.blockedBy.contains(where: { $0.id == blocker.id }) {
+                    ticket.blockedBy.append(blocker)
+                }
+                if !blocker.blocks.contains(where: { $0.id == ticket.id }) {
+                    blocker.blocks.append(ticket)
+                }
+            }
+        }
+    }
+
+    private func resolveFeatureDependency(
+        _ reference: String,
+        ticketByFeatureId: [String: Ticket],
+        ticketByIssueId: [Int: Ticket],
+        ticketByIssueIid: [Int: Ticket],
+        ticketByKey: [String: Ticket]
+    ) -> Ticket? {
+        let trimmed = reference.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let ticket = ticketByFeatureId[trimmed] {
+            return ticket
+        }
+        if let issueNumber = Int(trimmed) {
+            return ticketByIssueIid[issueNumber] ?? ticketByIssueId[issueNumber]
+        }
+        if let key = ticketKey(from: trimmed) {
+            return ticketByKey[key]
+        }
+        return nil
+    }
+
+    private func ticketKey(from value: String) -> String? {
+        let pattern = #"\b[A-Z][A-Z0-9]+-\d+\b"#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)),
+              let range = Range(match.range, in: value) else {
+            return nil
+        }
+        return String(value[range])
+    }
+
+    /// Applies collaboration metadata derived from a GitLab issue.
+    private func applyRemoteIssueMetadata(
+        to ticket: Ticket,
+        from issue: GitLabIssue,
+        workspace: Workspace,
+        milestoneLookup: [Int: Sprint]
+    ) {
+        ticket.gitlabIssueId = issue.id
+        ticket.gitlabIssueIid = issue.iid
+        ticket.workspace = workspace
+        ticket.labels = FieldMapping.nonWorkflowLabels(issue.labels)
+
+        if !workspace.tickets.contains(where: { $0.id == ticket.id }) {
+            workspace.tickets.append(ticket)
+        }
+
+        let assignee = issue.assignee ?? issue.assignees?.first
+        if let assignee {
+            ticket.assignee = workspace.members.first { $0.gitlabUserId == assignee.id }
+        } else {
+            ticket.assignee = nil
+        }
+
+        let sprint = issue.milestone.flatMap { milestoneLookup[$0.id] }
+        if ticket.sprint?.id != sprint?.id {
+            ticket.sprint?.tickets.removeAll { $0.id == ticket.id }
+            ticket.sprint = sprint
+        }
+        if let sprint, !sprint.tickets.contains(where: { $0.id == ticket.id }) {
+            sprint.tickets.append(ticket)
+        }
+    }
+
+    /// Returns a stable sprint date range even when GitLab milestone dates are partially missing.
+    private func milestoneDateRange(for milestone: GitLabMilestone) -> (start: Date, end: Date) {
+        let startDate = parseGitLabDate(milestone.startDate)
+        let dueDate = parseGitLabDate(milestone.dueDate)
+
+        if let startDate, let dueDate {
+            return (startDate, dueDate)
+        }
+
+        if let startDate {
+            let endDate = Calendar.current.date(byAdding: .day, value: 14, to: startDate) ?? startDate
+            return (startDate, endDate)
+        }
+
+        if let dueDate {
+            let startDate = Calendar.current.date(byAdding: .day, value: -14, to: dueDate) ?? dueDate
+            return (startDate, dueDate)
+        }
+
+        let fallbackStart = milestone.createdAt ?? Date()
+        let fallbackEnd = Calendar.current.date(byAdding: .day, value: 14, to: fallbackStart) ?? fallbackStart
+        return (fallbackStart, fallbackEnd)
+    }
+
+    /// Parses GitLab date-only strings such as `2024-03-15`.
+    private func parseGitLabDate(_ value: String?) -> Date? {
+        guard let value, !value.isEmpty else { return nil }
+        var components = DateComponents()
+        let parts = value.split(separator: "-").compactMap { Int($0) }
+        guard parts.count == 3 else { return nil }
+        components.calendar = Calendar(identifier: .gregorian)
+        components.timeZone = TimeZone(secondsFromGMT: 0)
+        components.year = parts[0]
+        components.month = parts[1]
+        components.day = parts[2]
+        return components.date
     }
 
     /// Applies a snapshot's values to a ticket.
@@ -721,7 +1192,6 @@ class SyncEngine {
             ticket.descriptionText = payload.objectAttributes.description
             let labels = payload.objectAttributes.labels?.map { $0.title } ?? []
             ticket.status = FieldMapping.gitLabToStatus(state: payload.objectAttributes.state, labels: labels)
-            ticket.storyPoints = FieldMapping.weightToStoryPoints(payload.objectAttributes.weight)
             ticket.labels = FieldMapping.nonWorkflowLabels(labels)
             ticket.updatedAt = Date()
             ticket.lastSyncedAt = Date()
@@ -759,7 +1229,7 @@ class SyncEngine {
             title: payload.objectAttributes.title,
             descriptionText: payload.objectAttributes.description,
             status: status,
-            storyPoints: FieldMapping.weightToStoryPoints(payload.objectAttributes.weight),
+            storyPoints: nil,
             labels: FieldMapping.nonWorkflowLabels(labels),
             lastSyncedAt: Date(),
             localVersion: 1

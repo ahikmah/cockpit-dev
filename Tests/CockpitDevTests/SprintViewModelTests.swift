@@ -3,7 +3,7 @@ import SwiftData
 @testable import CockpitDev
 
 @MainActor
-final class SprintViewModelTests: XCTestCase {
+final class SprintViewModelTests: CockpitDevTestCase {
 
     private var viewModel: SprintViewModel!
     private var modelContext: ModelContext!
@@ -80,6 +80,36 @@ final class SprintViewModelTests: XCTestCase {
     }
 
     // MARK: - Sprint Form Validation Tests
+
+    func testOrderedTicketsUsesPlanningDateThenIssueIid() {
+        let calendar = Calendar.current
+        let base = calendar.startOfDay(for: Date())
+        let sprint = createSprint(name: "Planning Sprint", startDate: base)
+
+        let later = createTicket(title: "Later", storyPoints: 13, sprint: sprint)
+        later.startDate = calendar.date(byAdding: .day, value: 3, to: base)
+        later.endDate = calendar.date(byAdding: .day, value: 5, to: base)
+        later.gitlabIssueIid = 9
+
+        let earlierHighSp = createTicket(title: "Earlier High SP", storyPoints: 21, sprint: sprint)
+        earlierHighSp.startDate = calendar.date(byAdding: .day, value: 1, to: base)
+        earlierHighSp.endDate = calendar.date(byAdding: .day, value: 2, to: base)
+        earlierHighSp.gitlabIssueIid = 7
+
+        let sameDateLowerIid = createTicket(title: "Same Date Lower IID", storyPoints: 1, sprint: sprint)
+        sameDateLowerIid.startDate = earlierHighSp.startDate
+        sameDateLowerIid.endDate = earlierHighSp.endDate
+        sameDateLowerIid.gitlabIssueIid = 4
+
+        let unscheduled = createTicket(title: "Unscheduled", storyPoints: 34, sprint: sprint)
+        unscheduled.gitlabIssueIid = 1
+        try? modelContext.save()
+
+        XCTAssertEqual(
+            viewModel.orderedTickets(for: sprint).map(\.title),
+            ["Same Date Lower IID", "Earlier High SP", "Later", "Unscheduled"]
+        )
+    }
 
     func testValidateSprintForm_validInput() {
         viewModel.newSprintName = "Sprint 1"
@@ -255,6 +285,19 @@ final class SprintViewModelTests: XCTestCase {
 
         XCTAssertNil(ticket.sprint)
         XCTAssertFalse(sprint.tickets.contains(where: { $0.id == ticket.id }))
+    }
+
+    func testDeleteSprintRemovesSprintAndNullifiesTickets() async {
+        let sprint = createSprint(name: "Sprint 1")
+        let ticket = createTicket(title: "Assigned Ticket", storyPoints: 5, sprint: sprint)
+        viewModel.refreshSprints()
+
+        await viewModel.deleteSprint(sprint)
+
+        XCTAssertTrue(viewModel.sprints.isEmpty)
+        XCTAssertNil(ticket.sprint)
+        XCTAssertTrue(workspace.tickets.contains(where: { $0.id == ticket.id }))
+        XCTAssertFalse(workspace.sprints.contains(where: { $0.id == sprint.id }))
     }
 
     func testAssignTicket_alreadyAssigned_noDuplicate() {

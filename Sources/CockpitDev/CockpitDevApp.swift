@@ -4,6 +4,8 @@ import SwiftData
 @main
 struct CockpitDevApp: App {
 
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+
     /// The SwiftData model container configured with all model types.
     let modelContainer: ModelContainer
 
@@ -16,7 +18,15 @@ struct CockpitDevApp: App {
     /// Keyboard shortcut state for handling app-wide shortcuts.
     @State private var shortcutState = KeyboardShortcutState()
 
+    /// User-selected app appearance.
+    @AppStorage(AppearancePreference.storageKey) private var appearancePreference = AppearancePreference.system.rawValue
+
+    /// Shared credential services for the app process.
+    private let credentialServices: CredentialServices
+
     init() {
+        credentialServices = CredentialServices()
+
         do {
             let schema = Schema([
                 Workspace.self,
@@ -50,7 +60,11 @@ struct CockpitDevApp: App {
             AppRootView(authService: authService)
                 .environment(windowStateService)
                 .environment(shortcutState)
+                .environment(\.credentialServices, credentialServices)
                 .persistWindowState(using: windowStateService)
+                .preferredColorScheme(
+                    AppearancePreference(rawValue: appearancePreference)?.colorScheme
+                )
         }
         .modelContainer(modelContainer)
         .defaultSize(

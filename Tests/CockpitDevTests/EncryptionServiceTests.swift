@@ -1,18 +1,25 @@
 import XCTest
+import Security
 @testable import CockpitDev
 
-final class EncryptionServiceTests: XCTestCase {
+final class EncryptionServiceTests: CockpitDevTestCase {
 
     private var service: EncryptionService!
+    private var keychainStorage: InMemoryKeychainStorage!
 
     override func setUp() {
         super.setUp()
         // Use a unique service identifier for tests to avoid conflicts with production Keychain
-        service = EncryptionService(serviceIdentifier: "com.cockpitdev.tests.\(UUID().uuidString)")
+        keychainStorage = InMemoryKeychainStorage()
+        service = EncryptionService(
+            serviceIdentifier: "com.cockpitdev.tests.\(UUID().uuidString)",
+            keychainStorage: keychainStorage
+        )
     }
 
     override func tearDown() {
         service = nil
+        keychainStorage = nil
         super.tearDown()
     }
 
@@ -115,6 +122,19 @@ final class EncryptionServiceTests: XCTestCase {
 
     // MARK: - Keychain Tests
 
+    func testInitializationDoesNotCreateEncryptionKeyKeychainItem() {
+        let serviceIdentifier = "com.cockpitdev.tests.lazy.\(UUID().uuidString)"
+        let keyTag = "\(serviceIdentifier).encryptionKey"
+        let storage = InMemoryKeychainStorage()
+
+        _ = EncryptionService(serviceIdentifier: serviceIdentifier, keychainStorage: storage)
+
+        XCTAssertEqual(
+            storage.data(service: serviceIdentifier, account: keyTag).status,
+            errSecItemNotFound
+        )
+    }
+
     func testStoreAndRetrieveFromKeychain() throws {
         let key = "test-token-\(UUID().uuidString)"
         let value = "glpat-secret-token-12345"
@@ -180,5 +200,83 @@ final class EncryptionServiceTests: XCTestCase {
 
         // Cleanup
         try service.deleteFromKeychain(key: key)
+    }
+
+    func testRetrieveFromKeychainUsesProcessCacheAfterFirstRead() throws {
+        let serviceIdentifier = "com.cockpitdev.tests.cache.\(UUID().uuidString)"
+        let storage = CountingKeychainStorage(base: InMemoryKeychainStorage())
+        let key = "gitlab.oauth.clientId"
+        let value = "oauth-client-id"
+
+        let writer = EncryptionService(serviceIdentifier: serviceIdentifier, keychainStorage: storage)
+        try writer.storeInKeychain(key: key, value: value)
+        storage.resetCounts()
+
+        let reader = EncryptionService(serviceIdentifier: serviceIdentifier, keychainStorage: storage)
+        XCTAssertEqual(try reader.retrieveFromKeychain(key: key), value)
+        XCTAssertEqual(try reader.retrieveFromKeychain(key: key), value)
+        XCTAssertEqual(try reader.retrieveFromKeychain(key: key), value)
+
+        XCTAssertEqual(
+            storage.dataCallCount(service: serviceIdentifier, account: key),
+            1,
+            "Credential value should hit Keychain once, then be served from the process cache."
+        )
+    }
+
+    func testStoreUpdatesKeychainCacheForOverwrittenValue() throws {
+        let key = "test-cache-overwrite-\(UUID().uuidString)"
+
+        try service.storeInKeychain(key: key, value: "first")
+        XCTAssertEqual(try service.retrieveFromKeychain(key: key), "first")
+
+        try service.storeInKeychain(key: key, value: "second")
+        XCTAssertEqual(try service.retrieveFromKeychain(key: key), "second")
+    }
+
+}
+
+private final class CountingKeychainStorage: KeychainStorage {
+    private let base: KeychainStorage
+    private var dataCalls: [String: Int] = [:]
+    private let lock = NSLock()
+
+    init(base: KeychainStorage) {
+        self.base = base
+    }
+
+    func data(service: String, account: String) -> (status: OSStatus, data: Data?) {
+        lock.withLock {
+            dataCalls[itemKey(service: service, account: account), default: 0] += 1
+        }
+        return base.data(service: service, account: account)
+    }
+
+    func add(data: Data, service: String, account: String) -> OSStatus {
+        base.add(data: data, service: service, account: account)
+    }
+
+    func update(data: Data, service: String, account: String) -> OSStatus {
+        base.update(data: data, service: service, account: account)
+    }
+
+    func delete(service: String, account: String) -> OSStatus {
+        base.delete(service: service, account: account)
+    }
+
+    func dataCallCount(service: String, account: String) -> Int {
+        lock.withLock {
+            dataCalls[itemKey(service: service, account: account), default: 0]
+        }
+    }
+
+    func resetCounts() {
+        lock.withLock {
+            dataCalls.removeAll()
+        }
+    }
+
+    private func itemKey(service: String, account: String) -> String {
+        "\(service):\(account)"
     }
 }

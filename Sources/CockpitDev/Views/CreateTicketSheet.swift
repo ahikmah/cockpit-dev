@@ -1,44 +1,47 @@
 import SwiftUI
 import SwiftData
 
-/// Sheet for creating a new ticket with title (required), description, priority,
-/// story points (Fibonacci validation), labels, assignee, and dates.
+/// GitLab-style ticket composer for creating a local ticket and pushing it to GitLab.
 struct CreateTicketSheet: View {
 
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.modelContext) private var modelContext
-
     @Bindable var viewModel: TicketManagementViewModel
 
-    /// Members available for assignment in the current workspace.
     let members: [Member]
-
-    // MARK: - Form State
+    let sprints: [Sprint]
+    let defaultSprint: Sprint?
 
     @State private var title: String = ""
     @State private var descriptionText: String = ""
-    @State private var selectedPriority: TicketPriority? = nil
+    @State private var selectedPriority: TicketPriority?
     @State private var storyPointsText: String = ""
     @State private var labelsText: String = ""
-    @State private var selectedAssignee: Member? = nil
-    @State private var startDate: Date? = nil
-    @State private var endDate: Date? = nil
-    @State private var showStartDatePicker: Bool = false
-    @State private var showEndDatePicker: Bool = false
-
-    // MARK: - Validation State
-
+    @State private var selectedAssignee: Member?
+    @State private var selectedSprint: Sprint?
+    @State private var startDate: Date?
+    @State private var endDate: Date?
     @State private var titleError: String?
     @State private var storyPointsError: String?
     @State private var isSubmitting: Bool = false
+    @State private var isConfidential: Bool = false
 
-    /// Whether the form is valid for submission.
+    init(
+        viewModel: TicketManagementViewModel,
+        members: [Member],
+        sprints: [Sprint] = [],
+        defaultSprint: Sprint? = nil
+    ) {
+        self.viewModel = viewModel
+        self.members = members
+        self.sprints = sprints
+        self.defaultSprint = defaultSprint
+        self._selectedSprint = State(initialValue: defaultSprint)
+    }
+
     private var isFormValid: Bool {
-        let trimmedTitle = title.trimmingCharacters(in: .whitespaces)
-        guard !trimmedTitle.isEmpty else { return false }
-        if !storyPointsText.isEmpty {
-            guard let sp = Int(storyPointsText),
-                  AppConstants.fibonacciSequence.contains(sp) else { return false }
+        guard !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        if !storyPointsText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            guard let value = Int(storyPointsText), value > 0 else { return false }
         }
         return true
     }
@@ -47,329 +50,214 @@ struct CreateTicketSheet: View {
         VStack(spacing: 0) {
             header
             Divider()
-            formContent
+
+            ScrollView {
+                HStack(alignment: .top, spacing: DesignSystem.Spacing.spacing24) {
+                    primaryColumn
+                    metadataColumn
+                }
+                .padding(DesignSystem.Spacing.spacing24)
+            }
+
             Divider()
             footer
         }
-        .frame(width: 520, height: 600)
+        .frame(width: 980, height: 720)
         .background(DesignSystem.Colors.surfaceElevated)
         .clipShape(RoundedRectangle(cornerRadius: DesignSystem.Radius.xl))
+        .onAppear {
+            if selectedSprint == nil {
+                selectedSprint = defaultSprint
+            }
+        }
     }
 
-    // MARK: - Header
-
     private var header: some View {
-        HStack {
-            Text("Create Ticket")
-                .font(DesignSystem.Typography.headingMedium)
-                .foregroundStyle(DesignSystem.Colors.textPrimary)
+        HStack(spacing: DesignSystem.Spacing.spacing12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("New issue")
+                    .font(DesignSystem.Typography.headingMedium)
+                    .foregroundStyle(DesignSystem.Colors.textPrimary)
+                Text("Create a GitLab issue and keep planning metadata in CockpitDev.")
+                    .font(DesignSystem.Typography.caption)
+                    .foregroundStyle(DesignSystem.Colors.textSecondary)
+            }
 
             Spacer()
 
             Button {
                 dismiss()
             } label: {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 18))
-                    .foregroundStyle(DesignSystem.Colors.textTertiary)
+                Image(systemName: "xmark")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(DesignSystem.Colors.textSecondary)
+                    .frame(width: 28, height: 28)
+                    .background(DesignSystem.Colors.surface)
+                    .clipShape(Circle())
             }
             .buttonStyle(.plain)
         }
-        .padding(DesignSystem.Spacing.spacing24)
+        .padding(.horizontal, DesignSystem.Spacing.spacing24)
+        .padding(.vertical, DesignSystem.Spacing.spacing16)
     }
 
-    // MARK: - Form Content
-
-    private var formContent: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: DesignSystem.Spacing.spacing16) {
-                titleField
-                descriptionField
-                priorityField
-                storyPointsField
-                labelsField
-                assigneeField
-                dateFields
-            }
-            .padding(DesignSystem.Spacing.spacing24)
-        }
-    }
-
-    // MARK: - Title Field
-
-    private var titleField: some View {
-        VStack(alignment: .leading, spacing: DesignSystem.Spacing.spacing6) {
-            HStack(spacing: DesignSystem.Spacing.spacing4) {
-                Text("Title")
-                    .font(DesignSystem.Typography.captionMedium)
-                    .foregroundStyle(DesignSystem.Colors.textSecondary)
-                Text("*")
-                    .font(DesignSystem.Typography.captionMedium)
-                    .foregroundStyle(DesignSystem.Colors.danger)
+    private var primaryColumn: some View {
+        VStack(alignment: .leading, spacing: DesignSystem.Spacing.spacing16) {
+            formField("Type") {
+                staticTypeField
             }
 
-            TextField("Enter ticket title", text: $title)
-                .textFieldStyle(.plain)
-                .font(DesignSystem.Typography.bodyRegular)
-                .padding(.horizontal, DesignSystem.Spacing.spacing12)
-                .padding(.vertical, DesignSystem.Spacing.spacing8)
-                .background(
-                    RoundedRectangle(cornerRadius: DesignSystem.Radius.medium)
-                        .fill(Color(nsColor: .controlBackgroundColor))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: DesignSystem.Radius.medium)
-                        .stroke(
-                            titleError != nil ? DesignSystem.Colors.danger : DesignSystem.Colors.border,
-                            lineWidth: 1
-                        )
-                )
-                .onChange(of: title) { _, newValue in
-                    validateTitle(newValue)
-                }
-
-            if let error = titleError {
-                errorLabel(error)
-            }
-        }
-    }
-
-    // MARK: - Description Field
-
-    private var descriptionField: some View {
-        VStack(alignment: .leading, spacing: DesignSystem.Spacing.spacing6) {
-            Text("Description")
-                .font(DesignSystem.Typography.captionMedium)
-                .foregroundStyle(DesignSystem.Colors.textSecondary)
-
-            TextEditor(text: $descriptionText)
-                .font(DesignSystem.Typography.bodyRegular)
-                .frame(minHeight: 80, maxHeight: 120)
-                .padding(DesignSystem.Spacing.spacing8)
-                .background(
-                    RoundedRectangle(cornerRadius: DesignSystem.Radius.medium)
-                        .fill(Color(nsColor: .controlBackgroundColor))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: DesignSystem.Radius.medium)
-                        .stroke(DesignSystem.Colors.border, lineWidth: 1)
-                )
-                .scrollContentBackground(.hidden)
-        }
-    }
-
-    // MARK: - Priority Field
-
-    private var priorityField: some View {
-        VStack(alignment: .leading, spacing: DesignSystem.Spacing.spacing6) {
-            Text("Priority")
-                .font(DesignSystem.Typography.captionMedium)
-                .foregroundStyle(DesignSystem.Colors.textSecondary)
-
-            Picker("Priority", selection: $selectedPriority) {
-                Text("None").tag(nil as TicketPriority?)
-                ForEach(TicketPriority.allCases, id: \.self) { priority in
-                    Text(priority.displayName).tag(priority as TicketPriority?)
-                }
-            }
-            .pickerStyle(.menu)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
-    // MARK: - Story Points Field
-
-    private var storyPointsField: some View {
-        VStack(alignment: .leading, spacing: DesignSystem.Spacing.spacing6) {
-            Text("Story Points")
-                .font(DesignSystem.Typography.captionMedium)
-                .foregroundStyle(DesignSystem.Colors.textSecondary)
-
-            HStack(spacing: DesignSystem.Spacing.spacing8) {
-                ForEach(AppConstants.fibonacciSequence, id: \.self) { value in
-                    Button {
-                        storyPointsText = String(value)
-                        storyPointsError = nil
-                    } label: {
-                        Text("\(value)")
-                            .font(DesignSystem.Typography.bodyMedium)
-                            .foregroundStyle(
-                                storyPointsText == String(value)
-                                    ? .white
-                                    : DesignSystem.Colors.textPrimary
-                            )
-                            .frame(width: 36, height: 32)
-                            .background(
-                                RoundedRectangle(cornerRadius: DesignSystem.Radius.small)
-                                    .fill(
-                                        storyPointsText == String(value)
-                                            ? DesignSystem.Colors.accent
-                                            : DesignSystem.Colors.accentSoft
-                                    )
-                            )
+            formField("Title (required)") {
+                TextField("", text: $title)
+                    .textFieldStyle(.plain)
+                    .font(DesignSystem.Typography.bodyRegular)
+                    .padding(.horizontal, DesignSystem.Spacing.spacing12)
+                    .padding(.vertical, DesignSystem.Spacing.spacing8)
+                    .background(fieldBackground(titleError != nil))
+                    .onChange(of: title) { _, newValue in
+                        titleError = newValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !newValue.isEmpty
+                            ? "Title is required."
+                            : nil
                     }
-                    .buttonStyle(.plain)
-                }
-
-                Spacer()
-
-                if !storyPointsText.isEmpty {
-                    Button {
-                        storyPointsText = ""
-                        storyPointsError = nil
-                    } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .font(.system(size: 14))
-                            .foregroundStyle(DesignSystem.Colors.textTertiary)
-                    }
-                    .buttonStyle(.plain)
-                }
             }
 
-            if let error = storyPointsError {
-                errorLabel(error)
+            if let titleError {
+                errorLabel(titleError)
             }
-        }
-    }
 
-    // MARK: - Labels Field
-
-    private var labelsField: some View {
-        VStack(alignment: .leading, spacing: DesignSystem.Spacing.spacing6) {
-            Text("Labels")
-                .font(DesignSystem.Typography.captionMedium)
-                .foregroundStyle(DesignSystem.Colors.textSecondary)
-
-            TextField("Comma-separated labels (e.g., bug, frontend)", text: $labelsText)
-                .textFieldStyle(.plain)
-                .font(DesignSystem.Typography.bodyRegular)
-                .padding(.horizontal, DesignSystem.Spacing.spacing12)
-                .padding(.vertical, DesignSystem.Spacing.spacing8)
-                .background(
-                    RoundedRectangle(cornerRadius: DesignSystem.Radius.medium)
-                        .fill(Color(nsColor: .controlBackgroundColor))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: DesignSystem.Radius.medium)
-                        .stroke(DesignSystem.Colors.border, lineWidth: 1)
-                )
-        }
-    }
-
-    // MARK: - Assignee Field
-
-    private var assigneeField: some View {
-        VStack(alignment: .leading, spacing: DesignSystem.Spacing.spacing6) {
-            Text("Assignee")
-                .font(DesignSystem.Typography.captionMedium)
-                .foregroundStyle(DesignSystem.Colors.textSecondary)
-
-            Picker("Assignee", selection: $selectedAssignee) {
-                Text("Unassigned").tag(nil as Member?)
-                ForEach(members, id: \.id) { member in
-                    Text(member.displayName).tag(member as Member?)
-                }
-            }
-            .pickerStyle(.menu)
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
-    // MARK: - Date Fields
-
-    private var dateFields: some View {
-        HStack(spacing: DesignSystem.Spacing.spacing16) {
-            // Start Date
-            VStack(alignment: .leading, spacing: DesignSystem.Spacing.spacing6) {
-                Text("Start Date")
+            VStack(alignment: .leading, spacing: DesignSystem.Spacing.spacing8) {
+                Text("Description")
                     .font(DesignSystem.Typography.captionMedium)
+                    .foregroundStyle(DesignSystem.Colors.textPrimary)
+                Text("Use markdown for tables, code blocks, images, task lists, and mermaid diagrams.")
+                    .font(DesignSystem.Typography.caption)
                     .foregroundStyle(DesignSystem.Colors.textSecondary)
 
-                HStack {
-                    if let date = startDate {
-                        DatePicker("", selection: Binding(
-                            get: { date },
-                            set: { startDate = $0 }
-                        ), displayedComponents: .date)
-                        .labelsHidden()
-
-                        Button {
-                            startDate = nil
-                        } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .font(.system(size: 12))
-                                .foregroundStyle(DesignSystem.Colors.textTertiary)
-                        }
-                        .buttonStyle(.plain)
-                    } else {
-                        Button {
-                            startDate = Date()
-                        } label: {
-                            HStack(spacing: DesignSystem.Spacing.spacing4) {
-                                Image(systemName: "calendar")
-                                Text("Set date")
-                            }
-                            .font(DesignSystem.Typography.bodyRegular)
-                            .foregroundStyle(DesignSystem.Colors.textSecondary)
-                            .padding(.horizontal, DesignSystem.Spacing.spacing12)
-                            .padding(.vertical, DesignSystem.Spacing.spacing6)
-                            .background(
-                                RoundedRectangle(cornerRadius: DesignSystem.Radius.small)
-                                    .stroke(DesignSystem.Colors.border, lineWidth: 1)
-                            )
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
+                MarkdownEditorView(
+                    text: $descriptionText,
+                    placeholder: "Write a description or drag your notes here...",
+                    minHeight: 330
+                )
             }
 
-            // End Date
-            VStack(alignment: .leading, spacing: DesignSystem.Spacing.spacing6) {
-                Text("End Date")
-                    .font(DesignSystem.Typography.captionMedium)
+            Toggle(isOn: $isConfidential) {
+                Text("Turn on confidentiality: limit visibility to project members with at least the Planner role.")
+                    .font(DesignSystem.Typography.bodyRegular)
                     .foregroundStyle(DesignSystem.Colors.textSecondary)
-
-                HStack {
-                    if let date = endDate {
-                        DatePicker("", selection: Binding(
-                            get: { date },
-                            set: { endDate = $0 }
-                        ), displayedComponents: .date)
-                        .labelsHidden()
-
-                        Button {
-                            endDate = nil
-                        } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .font(.system(size: 12))
-                                .foregroundStyle(DesignSystem.Colors.textTertiary)
-                        }
-                        .buttonStyle(.plain)
-                    } else {
-                        Button {
-                            endDate = Date()
-                        } label: {
-                            HStack(spacing: DesignSystem.Spacing.spacing4) {
-                                Image(systemName: "calendar")
-                                Text("Set date")
-                            }
-                            .font(DesignSystem.Typography.bodyRegular)
-                            .foregroundStyle(DesignSystem.Colors.textSecondary)
-                            .padding(.horizontal, DesignSystem.Spacing.spacing12)
-                            .padding(.vertical, DesignSystem.Spacing.spacing6)
-                            .background(
-                                RoundedRectangle(cornerRadius: DesignSystem.Radius.small)
-                                    .stroke(DesignSystem.Colors.border, lineWidth: 1)
-                            )
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
             }
+            .toggleStyle(.checkbox)
         }
+        .frame(minWidth: 560, maxWidth: .infinity, alignment: .topLeading)
     }
 
-    // MARK: - Footer
+    private var staticTypeField: some View {
+        HStack(spacing: DesignSystem.Spacing.spacing8) {
+            Image(systemName: "circle.dashed")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(DesignSystem.Colors.textSecondary)
+            Text("Issue")
+                .font(DesignSystem.Typography.bodyRegular)
+                .foregroundStyle(DesignSystem.Colors.textPrimary)
+            Spacer()
+            Image(systemName: "chevron.down")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(DesignSystem.Colors.textTertiary)
+        }
+        .padding(.horizontal, DesignSystem.Spacing.spacing12)
+        .padding(.vertical, DesignSystem.Spacing.spacing8)
+        .frame(width: 220, alignment: .leading)
+        .background(fieldBackground(false))
+        .contentShape(RoundedRectangle(cornerRadius: DesignSystem.Radius.medium))
+        .help("Only GitLab issues are supported for now.")
+    }
+
+    private var metadataColumn: some View {
+        VStack(alignment: .leading, spacing: DesignSystem.Spacing.spacing16) {
+            metadataPicker(
+                title: "Assignee",
+                value: selectedAssignee?.displayName ?? "None - assign later"
+            ) {
+                Picker("Assignee", selection: $selectedAssignee) {
+                    Text("None").tag(nil as Member?)
+                    ForEach(members, id: \.id) { member in
+                        Text(member.displayName).tag(member as Member?)
+                    }
+                }
+                .labelsHidden()
+            }
+
+            metadataTextField(
+                title: "Labels",
+                value: $labelsText,
+                placeholder: "backend, scheduler"
+            )
+
+            metadataPicker(
+                title: "Milestone",
+                value: selectedSprint?.name ?? "None"
+            ) {
+                Picker("Milestone", selection: $selectedSprint) {
+                    Text("None").tag(nil as Sprint?)
+                    ForEach(sprints, id: \.id) { sprint in
+                        Text(sprint.name).tag(sprint as Sprint?)
+                    }
+                }
+                .labelsHidden()
+            }
+
+            metadataPicker(
+                title: "Priority",
+                value: selectedPriority?.displayName ?? "None"
+            ) {
+                Picker("Priority", selection: $selectedPriority) {
+                    Text("None").tag(nil as TicketPriority?)
+                    ForEach(TicketPriority.allCases, id: \.self) { priority in
+                        Text(priority.displayName).tag(priority as TicketPriority?)
+                    }
+                }
+                .labelsHidden()
+            }
+
+            metadataTextField(
+                title: "Story Points",
+                value: $storyPointsText,
+                placeholder: "8"
+            )
+            .onChange(of: storyPointsText) { _, newValue in
+                let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                storyPointsError = trimmed.isEmpty || (Int(trimmed) ?? 0) > 0
+                    ? nil
+                    : "Story points must be positive."
+            }
+
+            if let storyPointsError {
+                errorLabel(storyPointsError)
+            }
+
+            dateMetadata
+
+            Text("Planning metadata such as start date, story points, and dependencies stays in the planning DB. GitLab receives issue fields it supports.")
+                .font(DesignSystem.Typography.caption)
+                .foregroundStyle(DesignSystem.Colors.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(width: 300, alignment: .topLeading)
+    }
+
+    private var dateMetadata: some View {
+        VStack(alignment: .leading, spacing: DesignSystem.Spacing.spacing10) {
+            metadataHeader("Dates", value: dateSummary)
+
+            HStack(spacing: DesignSystem.Spacing.spacing10) {
+                dateControl("Start", date: $startDate)
+                dateControl("Due", date: $endDate)
+            }
+        }
+        .padding(.bottom, DesignSystem.Spacing.spacing12)
+        .overlay(alignment: .bottom) {
+            Divider()
+        }
+    }
 
     private var footer: some View {
         HStack {
@@ -378,68 +266,149 @@ struct CreateTicketSheet: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(DesignSystem.Colors.textSecondary)
-            .font(DesignSystem.Typography.bodyMedium)
 
             Spacer()
 
             Button {
                 createTicket()
             } label: {
-                Text("Create Ticket")
-                    .font(DesignSystem.Typography.bodyMedium)
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, DesignSystem.Spacing.spacing16)
-                    .padding(.vertical, DesignSystem.Spacing.spacing8)
-                    .background(
-                        RoundedRectangle(cornerRadius: DesignSystem.Radius.small)
-                            .fill(isFormValid ? DesignSystem.Colors.accent : DesignSystem.Colors.accent.opacity(0.4))
-                    )
+                if isSubmitting {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Text("Create issue")
+                        .font(DesignSystem.Typography.bodyMedium)
+                }
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.borderedProminent)
             .disabled(!isFormValid || isSubmitting)
         }
-        .padding(DesignSystem.Spacing.spacing24)
+        .padding(.horizontal, DesignSystem.Spacing.spacing24)
+        .padding(.vertical, DesignSystem.Spacing.spacing12)
     }
 
-    // MARK: - Helpers
+    private func formField<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: DesignSystem.Spacing.spacing8) {
+            Text(title)
+                .font(DesignSystem.Typography.captionMedium)
+                .foregroundStyle(DesignSystem.Colors.textPrimary)
+            content()
+        }
+    }
+
+    private func metadataPicker<Content: View>(
+        title: String,
+        value: String,
+        @ViewBuilder picker: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: DesignSystem.Spacing.spacing8) {
+            metadataHeader(title, value: value)
+            picker()
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.bottom, DesignSystem.Spacing.spacing12)
+        .overlay(alignment: .bottom) {
+            Divider()
+        }
+    }
+
+    private func metadataTextField(title: String, value: Binding<String>, placeholder: String) -> some View {
+        VStack(alignment: .leading, spacing: DesignSystem.Spacing.spacing8) {
+            metadataHeader(title, value: value.wrappedValue.isEmpty ? "None" : value.wrappedValue)
+            TextField(placeholder, text: value)
+                .textFieldStyle(.plain)
+                .font(DesignSystem.Typography.bodyRegular)
+                .padding(.horizontal, DesignSystem.Spacing.spacing10)
+                .padding(.vertical, DesignSystem.Spacing.spacing6)
+                .background(fieldBackground(false))
+        }
+        .padding(.bottom, DesignSystem.Spacing.spacing12)
+        .overlay(alignment: .bottom) {
+            Divider()
+        }
+    }
+
+    private func metadataHeader(_ title: String, value: String) -> some View {
+        HStack(alignment: .top) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(DesignSystem.Typography.bodyMedium)
+                    .foregroundStyle(DesignSystem.Colors.textPrimary)
+                Text(value)
+                    .font(DesignSystem.Typography.bodyRegular)
+                    .foregroundStyle(DesignSystem.Colors.textSecondary)
+                    .lineLimit(2)
+            }
+            Spacer()
+        }
+    }
+
+    private func dateControl(_ title: String, date: Binding<Date?>) -> some View {
+        VStack(alignment: .leading, spacing: DesignSystem.Spacing.spacing6) {
+            Text(title)
+                .font(DesignSystem.Typography.caption)
+                .foregroundStyle(DesignSystem.Colors.textSecondary)
+
+            if let currentDate = date.wrappedValue {
+                HStack(spacing: DesignSystem.Spacing.spacing4) {
+                    DatePicker("", selection: Binding(
+                        get: { currentDate },
+                        set: { date.wrappedValue = $0 }
+                    ), displayedComponents: .date)
+                    .labelsHidden()
+
+                    Button {
+                        date.wrappedValue = nil
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 12))
+                            .foregroundStyle(DesignSystem.Colors.textTertiary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            } else {
+                Button {
+                    date.wrappedValue = Date()
+                } label: {
+                    Label("Set", systemImage: "calendar")
+                        .font(DesignSystem.Typography.captionMedium)
+                        .foregroundStyle(DesignSystem.Colors.textSecondary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var dateSummary: String {
+        let start = startDate.map(formatDate) ?? "None"
+        let due = endDate.map(formatDate) ?? "None"
+        return "Start: \(start)\nDue: \(due)"
+    }
+
+    private func fieldBackground(_ hasError: Bool) -> some View {
+        RoundedRectangle(cornerRadius: DesignSystem.Radius.medium)
+            .fill(Color(nsColor: .controlBackgroundColor))
+            .overlay {
+                RoundedRectangle(cornerRadius: DesignSystem.Radius.medium)
+                    .stroke(hasError ? DesignSystem.Colors.danger : DesignSystem.Colors.border, lineWidth: 1)
+            }
+    }
 
     private func errorLabel(_ text: String) -> some View {
-        HStack(spacing: DesignSystem.Spacing.spacing4) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 11))
-            Text(text)
-                .font(DesignSystem.Typography.caption)
-        }
-        .foregroundStyle(DesignSystem.Colors.danger)
-        .transition(.opacity.combined(with: .move(edge: .top)))
+        Label(text, systemImage: "exclamationmark.triangle.fill")
+            .font(DesignSystem.Typography.caption)
+            .foregroundStyle(DesignSystem.Colors.danger)
     }
-
-    // MARK: - Validation
-
-    private func validateTitle(_ input: String) {
-        let trimmed = input.trimmingCharacters(in: .whitespaces)
-        if trimmed.isEmpty && !input.isEmpty {
-            withAnimation(DesignSystem.Motion.fast) {
-                titleError = "Title is required."
-            }
-        } else {
-            withAnimation(DesignSystem.Motion.fast) {
-                titleError = nil
-            }
-        }
-    }
-
-    // MARK: - Actions
 
     private func createTicket() {
         guard isFormValid else { return }
 
         isSubmitting = true
-
-        let parsedStoryPoints: Int? = storyPointsText.isEmpty ? nil : Int(storyPointsText)
-        let parsedLabels: [String] = labelsText
+        let parsedStoryPoints = Int(storyPointsText.trimmingCharacters(in: .whitespacesAndNewlines))
+        let parsedLabels = labelsText
             .split(separator: ",")
-            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
 
         let success = viewModel.createTicket(
@@ -449,25 +418,26 @@ struct CreateTicketSheet: View {
             storyPoints: parsedStoryPoints,
             labels: parsedLabels,
             assignee: selectedAssignee,
+            sprint: selectedSprint,
             startDate: startDate,
             endDate: endDate
         )
 
         isSubmitting = false
-
         if success {
             dismiss()
-        } else {
-            // ViewModel will have set its own error
-            if let error = viewModel.errorMessage {
-                storyPointsError = error.contains("Fibonacci") ? error : nil
-                titleError = error.contains("title") ? error : nil
-            }
+        } else if let error = viewModel.errorMessage {
+            titleError = error.localizedCaseInsensitiveContains("title") ? error : nil
+            storyPointsError = error.localizedCaseInsensitiveContains("story") ? error : nil
         }
     }
-}
 
-// MARK: - TicketPriority Display Extension
+    private func formatDate(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "d MMM yyyy"
+        return formatter.string(from: date)
+    }
+}
 
 extension TicketPriority {
     var displayName: String {

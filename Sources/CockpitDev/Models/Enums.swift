@@ -40,6 +40,25 @@ enum TicketPriority: String, Codable, CaseIterable {
     case low
 }
 
+// MARK: - Deadline Appeal Status
+
+/// Lead decision for tickets that miss the planned due date for approved situational reasons.
+enum DeadlineAppealStatus: String, Codable, CaseIterable {
+    case none
+    case approved
+    case rejected
+}
+
+// MARK: - Ticket Realization Source
+
+/// Source used to determine when a ticket was actually realized.
+enum TicketRealizationSource: String, Codable, CaseIterable {
+    case mrCommit
+    case mrMention
+    case issueClosed
+    case manual
+}
+
 // MARK: - Pipeline Status
 
 /// Status of a GitLab CI/CD pipeline.

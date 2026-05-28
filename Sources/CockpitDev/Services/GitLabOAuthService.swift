@@ -452,6 +452,16 @@ actor GitLabOAuthService {
         return tokenData.accessToken
     }
 
+    /// Warms in-memory credential caches after app unlock so workspace changes do
+    /// not trigger delayed Keychain prompts.
+    func warmCredentialCache() {
+        guard (try? loadTokenData()) != nil else {
+            return
+        }
+
+        _ = try? encryptionService.retrieveFromKeychain(key: KeychainKeys.clientId)
+    }
+
     /// Checks whether a valid token exists (not expired).
     func hasValidToken() -> Bool {
         guard let tokenData = try? loadTokenData() else {

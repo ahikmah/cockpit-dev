@@ -13,7 +13,7 @@ import SwiftData
 /// - Document filtering by folder
 /// - Quick Look preview support detection
 @MainActor
-final class DocumentViewModelTests: XCTestCase {
+final class DocumentViewModelTests: CockpitDevTestCase {
 
     private var viewModel: DocumentViewModel!
     private var modelContext: ModelContext!

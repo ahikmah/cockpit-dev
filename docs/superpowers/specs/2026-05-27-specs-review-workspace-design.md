@@ -24,7 +24,8 @@ Use a persistent two-pane review workspace.
 
 - Display only the entries for the selected remote branch, preserving existing
   branch-scan behavior.
-- Keep the pane compact, approximately 280 to 340 points wide.
+- Keep the pane compact, approximately 280 to 340 points wide, with a 220-point
+  contraction at narrow window widths so the reader remains usable.
 - Show a searchable/scannable list of change names with one secondary line for
   branch and phase.
 - Show unread/update status without adding dense metadata.

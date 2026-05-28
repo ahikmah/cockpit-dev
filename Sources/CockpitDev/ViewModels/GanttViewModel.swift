@@ -2,32 +2,14 @@ import Foundation
 import SwiftData
 import SwiftUI
 
-/// Zoom level for the Gantt chart timeline.
-enum GanttZoomLevel: Int, CaseIterable {
-    case day = 0
-    case week = 1
-    case month = 2
-    case quarter = 3
-
-    /// The width in points per day at this zoom level.
-    var pointsPerDay: CGFloat {
-        switch self {
-        case .day: return 60
-        case .week: return 20
-        case .month: return 6
-        case .quarter: return 2
-        }
-    }
-
-    /// Display label for the zoom level.
-    var label: String {
-        switch self {
-        case .day: return "Day"
-        case .week: return "Week"
-        case .month: return "Month"
-        case .quarter: return "Quarter"
-        }
-    }
+/// A developer row in the timeline.
+struct GanttTimelineRow: Identifiable {
+    let id: String
+    let member: Member?
+    let title: String
+    let subtitle: String
+    let initials: String
+    let tickets: [Ticket]
 }
 
 /// ViewModel managing the Gantt chart state including zoom, scroll, ticket data,
@@ -40,8 +22,17 @@ class GanttViewModel {
     /// The current workspace being displayed.
     var workspace: Workspace?
 
-    /// Current zoom level.
-    var zoomLevel: GanttZoomLevel = .week
+    /// Continuous timeline scale in points per day.
+    var pointsPerDay: CGFloat = 20
+
+    /// Smallest readable timeline scale.
+    let minimumPointsPerDay: CGFloat = 1.5
+
+    /// Largest useful review scale.
+    let maximumPointsPerDay: CGFloat = 120
+
+    /// Selected milestone/sprint filter. Nil means all milestones.
+    var selectedSprint: Sprint?
 
     /// Scroll offset (x, y) for pan navigation.
     var scrollOffset: CGPoint = .zero
@@ -54,6 +45,9 @@ class GanttViewModel {
 
     /// Tickets without start or end dates (unscheduled).
     var unscheduledTickets: [Ticket] = []
+
+    /// Scheduled tickets grouped by assignee/developer.
+    var timelineRows: [GanttTimelineRow] = []
 
     /// Set of ticket IDs that have active dependency conflicts.
     var conflictedTicketIds: Set<UUID> = []
@@ -82,8 +76,11 @@ class GanttViewModel {
     /// Height of the timeline header.
     let headerHeight: CGFloat = 50
 
-    /// Left margin for ticket labels.
-    let labelWidth: CGFloat = 200
+    /// Left lane for developer labels.
+    let labelWidth: CGFloat = 256
+
+    /// Breathing room below the last developer row so bars and hover cards are not clipped at the viewport edge.
+    let bottomContentPadding: CGFloat = 72
 
     // MARK: - Dependencies
 
@@ -132,17 +129,45 @@ class GanttViewModel {
 
     /// Total width of the chart content area.
     var totalContentWidth: CGFloat {
-        CGFloat(totalDays) * zoomLevel.pointsPerDay
+        CGFloat(totalDays) * pointsPerDay
     }
 
     /// Total height of the scheduled section.
     var scheduledSectionHeight: CGFloat {
-        CGFloat(scheduledTickets.count) * (rowHeight + rowSpacing)
+        let rowsHeight = timelineRows.reduce(CGFloat(0)) { total, row in
+            total + rowHeight(for: row)
+        }
+        return rowsHeight + bottomContentPadding
     }
 
     /// The x-offset for today's date line.
     var todayXOffset: CGFloat {
         xPosition(for: Date())
+    }
+
+    /// Workspace milestones available for filtering.
+    var availableSprints: [Sprint] {
+        guard let workspace else { return [] }
+        return workspace.sprints.sorted {
+            if $0.startDate == $1.startDate {
+                return $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending
+            }
+            return $0.startDate < $1.startDate
+        }
+    }
+
+    /// Human-readable continuous zoom label.
+    var zoomLabel: String {
+        if pointsPerDay >= 80 {
+            return "Fine"
+        } else if pointsPerDay >= 28 {
+            return "Daily"
+        } else if pointsPerDay >= 8 {
+            return "Weekly"
+        } else if pointsPerDay >= 3 {
+            return "Monthly"
+        }
+        return "Overview"
     }
 
     // MARK: - Data Refresh
@@ -152,11 +177,15 @@ class GanttViewModel {
         guard let workspace = workspace else {
             scheduledTickets = []
             unscheduledTickets = []
+            timelineRows = []
             conflictedTicketIds = []
             return
         }
 
-        let allTickets = workspace.tickets
+        var allTickets = workspace.tickets
+        if let selectedSprint {
+            allTickets = allTickets.filter { $0.sprint?.id == selectedSprint.id }
+        }
 
         scheduledTickets = allTickets
             .filter { $0.startDate != nil && $0.endDate != nil }
@@ -166,7 +195,64 @@ class GanttViewModel {
             .filter { $0.startDate == nil || $0.endDate == nil }
             .sorted { $0.title < $1.title }
 
+        timelineRows = makeTimelineRows(from: scheduledTickets, workspace: workspace)
         evaluateConflicts()
+    }
+
+    private func makeTimelineRows(from tickets: [Ticket], workspace: Workspace) -> [GanttTimelineRow] {
+        let membersWithTickets = workspace.members
+            .compactMap { member -> GanttTimelineRow? in
+                let memberTickets = tickets
+                    .filter { $0.assignee?.id == member.id }
+                    .sorted(by: timelineSort)
+                guard !memberTickets.isEmpty else { return nil }
+                return GanttTimelineRow(
+                    id: member.id.uuidString,
+                    member: member,
+                    title: member.displayName,
+                    subtitle: "@\(member.username)",
+                    initials: initials(for: member.displayName),
+                    tickets: memberTickets
+                )
+            }
+            .sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
+
+        let unassignedTickets = tickets
+            .filter { $0.assignee == nil }
+            .sorted(by: timelineSort)
+
+        guard !unassignedTickets.isEmpty else {
+            return membersWithTickets
+        }
+
+        return membersWithTickets + [
+            GanttTimelineRow(
+                id: "unassigned",
+                member: nil,
+                title: "Unassigned",
+                subtitle: "No developer",
+                initials: "?",
+                tickets: unassignedTickets
+            )
+        ]
+    }
+
+    private func timelineSort(_ lhs: Ticket, _ rhs: Ticket) -> Bool {
+        let lhsStart = lhs.startDate ?? .distantFuture
+        let rhsStart = rhs.startDate ?? .distantFuture
+        if lhsStart == rhsStart {
+            return lhs.title.localizedCaseInsensitiveCompare(rhs.title) == .orderedAscending
+        }
+        return lhsStart < rhsStart
+    }
+
+    private func initials(for name: String) -> String {
+        let words = name.split(separator: " ")
+        let letters = words.prefix(2).compactMap(\.first)
+        if letters.isEmpty {
+            return String(name.prefix(1)).uppercased()
+        }
+        return String(letters).uppercased()
     }
 
     /// Evaluates dependency conflicts for all tickets in the workspace.
@@ -190,12 +276,12 @@ class GanttViewModel {
     /// Converts a date to an x-position on the chart.
     func xPosition(for date: Date) -> CGFloat {
         let days = Calendar.current.dateComponents([.day], from: chartStartDate, to: date).day ?? 0
-        return CGFloat(days) * zoomLevel.pointsPerDay
+        return CGFloat(days) * pointsPerDay
     }
 
     /// Converts an x-position to a date on the chart.
     func date(forXPosition x: CGFloat) -> Date {
-        let days = Int(x / zoomLevel.pointsPerDay)
+        let days = Int(x / pointsPerDay)
         return Calendar.current.date(byAdding: .day, value: days, to: chartStartDate) ?? chartStartDate
     }
 
@@ -203,7 +289,7 @@ class GanttViewModel {
     func barWidth(for ticket: Ticket) -> CGFloat {
         guard let start = ticket.startDate, let end = ticket.endDate else { return 0 }
         let days = Calendar.current.dateComponents([.day], from: start, to: end).day ?? 1
-        return CGFloat(max(days, 1)) * zoomLevel.pointsPerDay
+        return CGFloat(max(days, 1)) * pointsPerDay
     }
 
     /// Returns the x-position for a ticket bar.
@@ -217,6 +303,26 @@ class GanttViewModel {
         headerHeight + CGFloat(row) * (rowHeight + rowSpacing)
     }
 
+    /// Returns the top y-position for a developer row.
+    func rowYPosition(forRow rowIndex: Int) -> CGFloat {
+        headerHeight + timelineRows.prefix(rowIndex).reduce(CGFloat(0)) { total, row in
+            total + rowHeight(for: row)
+        }
+    }
+
+    /// Returns the height for a developer row based on ticket lanes.
+    func rowHeight(for row: GanttTimelineRow) -> CGFloat {
+        let laneCount = max(row.tickets.count, 1)
+        let laneHeight = CGFloat(laneCount) * (rowHeight + rowSpacing) + rowSpacing
+        return max(88, laneHeight)
+    }
+
+    /// Returns the y-position for a ticket inside a developer row.
+    func barYPosition(for ticket: Ticket, in row: GanttTimelineRow, rowIndex: Int) -> CGFloat {
+        let laneIndex = row.tickets.firstIndex { $0.id == ticket.id } ?? 0
+        return rowYPosition(forRow: rowIndex) + rowSpacing + CGFloat(laneIndex) * (rowHeight + rowSpacing)
+    }
+
     /// Returns the duration in days for a ticket.
     func ticketDuration(for ticket: Ticket) -> Int {
         guard let start = ticket.startDate, let end = ticket.endDate else { return 0 }
@@ -227,16 +333,12 @@ class GanttViewModel {
 
     /// Zooms in one level.
     func zoomIn() {
-        guard let currentIndex = GanttZoomLevel.allCases.firstIndex(of: zoomLevel),
-              currentIndex > 0 else { return }
-        zoomLevel = GanttZoomLevel.allCases[currentIndex - 1]
+        pointsPerDay = min(maximumPointsPerDay, pointsPerDay * 1.25)
     }
 
     /// Zooms out one level.
     func zoomOut() {
-        guard let currentIndex = GanttZoomLevel.allCases.firstIndex(of: zoomLevel),
-              currentIndex < GanttZoomLevel.allCases.count - 1 else { return }
-        zoomLevel = GanttZoomLevel.allCases[currentIndex + 1]
+        pointsPerDay = max(minimumPointsPerDay, pointsPerDay / 1.25)
     }
 
     /// Handles scroll/pinch zoom gesture magnitude.
@@ -252,18 +354,63 @@ class GanttViewModel {
 
     /// Updates scroll offset during drag-to-pan.
     func pan(by translation: CGSize) {
+        pan(by: translation, viewportSize: CGSize(width: 800, height: 400))
+    }
+
+    /// Updates scroll offset using the actual visible chart size.
+    func pan(by translation: CGSize, viewportSize: CGSize) {
         scrollOffset.x += translation.width
         scrollOffset.y += translation.height
 
-        // Clamp horizontal scroll
         let maxScrollX: CGFloat = 0
-        let minScrollX = -(totalContentWidth - 800) // approximate visible width
+        let visibleTimelineWidth = max(0, viewportSize.width - labelWidth)
+        let minScrollX = -max(0, totalContentWidth - visibleTimelineWidth)
         scrollOffset.x = min(maxScrollX, max(minScrollX, scrollOffset.x))
 
-        // Clamp vertical scroll
         let maxScrollY: CGFloat = 0
-        let minScrollY = -(scheduledSectionHeight - 400) // approximate visible height
+        let visibleTimelineHeight = max(0, viewportSize.height - headerHeight)
+        let minScrollY = -max(0, scheduledSectionHeight - visibleTimelineHeight)
         scrollOffset.y = min(maxScrollY, max(minScrollY, scrollOffset.y))
+    }
+
+    /// Converts AppKit scroll-wheel deltas into the chart's pan coordinate space.
+    func panTranslationForScrollWheel(
+        scrollingDeltaX: CGFloat,
+        scrollingDeltaY: CGFloat,
+        isShiftPressed: Bool
+    ) -> CGSize {
+        let horizontalDelta = scrollingDeltaX != 0 || isShiftPressed
+            ? (scrollingDeltaX != 0 ? scrollingDeltaX : scrollingDeltaY)
+            : 0
+        let verticalDelta = isShiftPressed ? 0 : scrollingDeltaY
+
+        return CGSize(width: -horizontalDelta, height: -verticalDelta)
+    }
+
+    /// Returns the rendered ticket under a chart point, accounting for current scroll offset.
+    func ticket(at location: CGPoint) -> Ticket? {
+        let offsetX = scrollOffset.x + labelWidth
+        let offsetY = scrollOffset.y
+
+        guard location.x >= labelWidth, location.y >= headerHeight else {
+            return nil
+        }
+
+        for (rowIndex, row) in timelineRows.enumerated() {
+            for ticket in row.tickets {
+                let barRect = CGRect(
+                    x: barXPosition(for: ticket) + offsetX,
+                    y: barYPosition(for: ticket, in: row, rowIndex: rowIndex) + offsetY,
+                    width: max(barWidth(for: ticket), 12),
+                    height: rowHeight
+                )
+                if barRect.contains(location) {
+                    return ticket
+                }
+            }
+        }
+
+        return nil
     }
 
     // MARK: - Auto-Scroll to Today
@@ -298,7 +445,7 @@ class GanttViewModel {
         }
 
         // Calculate the number of days to shift
-        let dayShift = Int(round(dragOffset / zoomLevel.pointsPerDay))
+        let dayShift = Int(round(dragOffset / pointsPerDay))
 
         guard dayShift != 0 else {
             resetDragState()
@@ -354,37 +501,67 @@ class GanttViewModel {
         conflictedTicketIds.contains(ticket.id)
     }
 
-    // MARK: - Assignee Color
+    /// Returns the local dependency neighborhood for hover/selection emphasis.
+    func focusedDependencyIds(for ticket: Ticket?) -> Set<UUID> {
+        guard let ticket else { return [] }
+        var ids: Set<UUID> = [ticket.id]
+        for blocker in ticket.blockedBy {
+            ids.insert(blocker.id)
+        }
+        for blocked in ticket.blocks {
+            ids.insert(blocked.id)
+        }
+        return ids
+    }
 
-    /// Returns a soft pastel color for a ticket based on its assignee.
+    // MARK: - Timeline Bar Color
+
+    /// Returns a calm semantic fill color for a ticket timeline bar.
     func barColor(for ticket: Ticket) -> Color {
         if hasConflict(ticket) {
-            return DesignSystem.Colors.dangerSoft
+            return DesignSystem.Colors.timelineConflict
         }
 
-        guard let assignee = ticket.assignee else {
-            return DesignSystem.Colors.accentSoft
+        guard ticket.assignee != nil else {
+            return DesignSystem.Colors.timelineUnassigned
         }
 
-        // Generate a consistent pastel color from the assignee's ID
-        let hash = assignee.id.hashValue
-        let hue = Double(abs(hash) % 360) / 360.0
-        return Color(hue: hue, saturation: 0.3, brightness: 0.95)
+        switch ticket.status {
+        case .backlog:
+            return DesignSystem.Colors.timelineBacklog
+        case .todo:
+            return DesignSystem.Colors.timelineTodo
+        case .inProgress:
+            return DesignSystem.Colors.timelineInProgress
+        case .inReview:
+            return DesignSystem.Colors.timelineInReview
+        case .done:
+            return DesignSystem.Colors.timelineDone
+        }
     }
 
     /// Returns the border color for a ticket bar.
     func barBorderColor(for ticket: Ticket) -> Color {
         if hasConflict(ticket) {
-            return DesignSystem.Colors.danger
+            return DesignSystem.Colors.timelineConflictBorder
         }
 
-        guard let assignee = ticket.assignee else {
-            return DesignSystem.Colors.accent.opacity(0.4)
+        guard ticket.assignee != nil else {
+            return DesignSystem.Colors.timelineUnassignedBorder
         }
 
-        let hash = assignee.id.hashValue
-        let hue = Double(abs(hash) % 360) / 360.0
-        return Color(hue: hue, saturation: 0.5, brightness: 0.7)
+        switch ticket.status {
+        case .backlog:
+            return DesignSystem.Colors.timelineBacklogBorder
+        case .todo:
+            return DesignSystem.Colors.timelineTodoBorder
+        case .inProgress:
+            return DesignSystem.Colors.timelineInProgressBorder
+        case .inReview:
+            return DesignSystem.Colors.timelineInReviewBorder
+        case .done:
+            return DesignSystem.Colors.timelineDoneBorder
+        }
     }
 
     // MARK: - Timeline Header Labels
@@ -395,16 +572,14 @@ class GanttViewModel {
         let calendar = Calendar.current
         let formatter = DateFormatter()
 
-        switch zoomLevel {
-        case .day:
+        if pointsPerDay >= 45 {
             formatter.dateFormat = "MMM d"
             var current = chartStartDate
             while current <= chartEndDate {
                 labels.append((current, formatter.string(from: current)))
                 current = calendar.date(byAdding: .day, value: 1, to: current) ?? current
             }
-
-        case .week:
+        } else if pointsPerDay >= 10 {
             formatter.dateFormat = "MMM d"
             var current = chartStartDate
             // Align to start of week
@@ -416,8 +591,7 @@ class GanttViewModel {
                 labels.append((current, formatter.string(from: current)))
                 current = calendar.date(byAdding: .weekOfYear, value: 1, to: current) ?? current
             }
-
-        case .month:
+        } else if pointsPerDay >= 3 {
             formatter.dateFormat = "MMM yyyy"
             var components = calendar.dateComponents([.year, .month], from: chartStartDate)
             components.day = 1
@@ -426,8 +600,7 @@ class GanttViewModel {
                 labels.append((current, formatter.string(from: current)))
                 current = calendar.date(byAdding: .month, value: 1, to: current) ?? current
             }
-
-        case .quarter:
+        } else {
             formatter.dateFormat = "QQQ yyyy"
             var components = calendar.dateComponents([.year, .month], from: chartStartDate)
             let month = components.month ?? 1

@@ -483,18 +483,14 @@ actor GitOperationsService {
             process.standardOutput = stdoutPipe
             process.standardError = stderrPipe
 
-            // Use NSLock-protected storage for thread-safe stderr accumulation
-            let lock = NSLock()
-            var stderrChunks: [String] = []
+            let stderrRecorder = GitOutputRecorder()
 
             // Read stderr for progress (git outputs progress to stderr)
             stderrPipe.fileHandleForReading.readabilityHandler = { handle in
                 let data = handle.availableData
                 guard !data.isEmpty else { return }
                 if let line = String(data: data, encoding: .utf8) {
-                    lock.lock()
-                    stderrChunks.append(line)
-                    lock.unlock()
+                    stderrRecorder.append(line)
                     // Parse each line for progress
                     let lines = line.components(separatedBy: CharacterSet.newlines)
                     for l in lines where !l.trimmingCharacters(in: .whitespaces).isEmpty {
@@ -516,14 +512,10 @@ actor GitOperationsService {
                 // Read any remaining stderr
                 let remainingStderr = stderrPipe.fileHandleForReading.readDataToEndOfFile()
                 if let remaining = String(data: remainingStderr, encoding: .utf8), !remaining.isEmpty {
-                    lock.lock()
-                    stderrChunks.append(remaining)
-                    lock.unlock()
+                    stderrRecorder.append(remaining)
                 }
 
-                lock.lock()
-                let stderrOutput = stderrChunks.joined()
-                lock.unlock()
+                let stderrOutput = stderrRecorder.joined()
 
                 continuation.resume(returning: GitResult(
                     stdout: stdout,
@@ -584,5 +576,22 @@ actor GitOperationsService {
             return nil
         }
         return Int(line[range])
+    }
+}
+
+private final class GitOutputRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var chunks: [String] = []
+
+    func append(_ chunk: String) {
+        lock.lock()
+        chunks.append(chunk)
+        lock.unlock()
+    }
+
+    func joined() -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        return chunks.joined()
     }
 }

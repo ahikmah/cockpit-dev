@@ -12,6 +12,7 @@ struct CreateWorkspaceSheet: View {
     @State private var workspaceName: String = ""
     @State private var validationError: String?
     @State private var isSubmitting: Bool = false
+    @FocusState private var isNameFieldFocused: Bool
 
     /// Whether the name field currently has valid input.
     private var isNameValid: Bool {
@@ -42,7 +43,12 @@ struct CreateWorkspaceSheet: View {
         }
         .frame(width: 420)
         .background(DesignSystem.Colors.surfaceElevated)
-        .clipShape(RoundedRectangle(cornerRadius: DesignSystem.Radius.xl))
+        .activateContainingWindow()
+        .onAppear {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                isNameFieldFocused = true
+            }
+        }
     }
 
     // MARK: - Subviews
@@ -74,23 +80,9 @@ struct CreateWorkspaceSheet: View {
                 .foregroundStyle(DesignSystem.Colors.textSecondary)
 
             TextField("e.g., My Project", text: $workspaceName)
-                .textFieldStyle(.plain)
+                .textFieldStyle(.roundedBorder)
                 .font(DesignSystem.Typography.bodyRegular)
-                .padding(.horizontal, DesignSystem.Spacing.spacing12)
-                .padding(.vertical, DesignSystem.Spacing.spacing8)
-                .background(
-                    RoundedRectangle(cornerRadius: DesignSystem.Radius.medium)
-                        .fill(Color(nsColor: .controlBackgroundColor))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: DesignSystem.Radius.medium)
-                        .stroke(
-                            validationError != nil
-                                ? DesignSystem.Colors.danger
-                                : DesignSystem.Colors.border,
-                            lineWidth: 1
-                        )
-                )
+                .focused($isNameFieldFocused)
                 .onChange(of: workspaceName) { _, newValue in
                     validateInput(newValue)
                 }

@@ -10,9 +10,13 @@ struct SpecListView: View {
     @Environment(\.modelContext) private var modelContext
     @State private var viewModel: SpecViewModel
     @State private var showingSettings: Bool = false
+    @State private var isFocusMode: Bool = false
+    @State private var searchText: String = ""
+    private let gitLabAPIClient: GitLabAPIClient
 
-    init(workspace: Workspace) {
+    init(workspace: Workspace, gitLabAPIClient: GitLabAPIClient) {
         _viewModel = State(initialValue: SpecViewModel(workspace: workspace))
+        self.gitLabAPIClient = gitLabAPIClient
     }
 
     var body: some View {
@@ -26,16 +30,19 @@ struct SpecListView: View {
             if viewModel.specs.isEmpty {
                 emptyStateView
             } else {
-                specListContent
+                reviewWorkspace
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(DesignSystem.Colors.background)
+        .onAppear {
+            viewModel.configure(modelContext: modelContext, apiClient: gitLabAPIClient)
+            Task {
+                await viewModel.loadBranchOptions()
+            }
+        }
         .sheet(isPresented: $showingSettings) {
             specSettingsSheet
-        }
-        .sheet(item: $viewModel.selectedSpec) { spec in
-            SpecDetailView(spec: spec, viewModel: viewModel)
         }
     }
 
@@ -48,14 +55,26 @@ struct SpecListView: View {
                     .font(DesignSystem.Typography.headingMedium)
                     .foregroundStyle(DesignSystem.Colors.textPrimary)
 
-                Text("Track OpenSpec specs from developer branches")
+                Text("Track OpenSpec changes on one remote branch")
                     .font(DesignSystem.Typography.caption)
                     .foregroundStyle(DesignSystem.Colors.textSecondary)
+
+                HStack(spacing: DesignSystem.Spacing.spacing8) {
+                    specContextPill(
+                        icon: "folder",
+                        text: viewModel.editingSpecPath.isEmpty ? "Path not configured" : viewModel.editingSpecPath
+                    )
+
+                    specContextPill(icon: "arrow.branch", text: viewModel.branchSummary)
+                    specContextPill(icon: "laptopcomputer", text: viewModel.localCheckoutSummary)
+                }
             }
 
             Spacer()
 
             HStack(spacing: DesignSystem.Spacing.spacing8) {
+                branchPicker
+
                 // Scan button
                 Button {
                     Task {
@@ -104,39 +123,199 @@ struct SpecListView: View {
         .background(DesignSystem.Colors.surface)
     }
 
-    // MARK: - Spec List Content
+    private var branchPicker: some View {
+        Picker("Scan branch", selection: branchSelection) {
+            ForEach(selectableBranches, id: \.self) { branch in
+                Text(branch).tag(branch)
+            }
+        }
+        .labelsHidden()
+        .frame(maxWidth: 210)
+        .disabled(viewModel.isLoadingBranches || viewModel.branchOptions.isEmpty || viewModel.isScanning)
+        .help("Remote branch to scan")
+    }
 
-    private var specListContent: some View {
-        ScrollView {
-            LazyVStack(spacing: DesignSystem.Spacing.spacing8) {
-                // Error banner
-                if let error = viewModel.errorMessage {
-                    errorBanner(message: error)
+    private var selectableBranches: [String] {
+        guard let selectedBranchName = viewModel.selectedBranchName,
+              !viewModel.branchOptions.contains(selectedBranchName) else {
+            return viewModel.branchOptions
+        }
+
+        return [selectedBranchName] + viewModel.branchOptions
+    }
+
+    private var branchSelection: Binding<String> {
+        Binding(
+            get: { viewModel.selectedBranchName ?? "" },
+            set: { newValue in
+                viewModel.selectBranch(newValue)
+                isFocusMode = false
+            }
+        )
+    }
+
+    // MARK: - Review Workspace
+
+    @ViewBuilder
+    private var reviewWorkspace: some View {
+        if isFocusMode {
+            detailPanel
+        } else {
+            HSplitView {
+                reviewQueue
+                    .frame(minWidth: 220, idealWidth: 280, maxWidth: 320)
+
+                detailPanel
+                    .frame(minWidth: 480)
+            }
+        }
+    }
+
+    private var reviewQueue: some View {
+        VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: DesignSystem.Spacing.spacing12) {
+                HStack {
+                    Text("Review Queue")
+                        .font(DesignSystem.Typography.headingSmall)
+                        .foregroundStyle(DesignSystem.Colors.textPrimary)
+                    Spacer()
+                    Text("\(viewModel.availableSpecs.count)")
+                        .font(DesignSystem.Typography.captionMedium)
+                        .foregroundStyle(DesignSystem.Colors.textSecondary)
+                        .padding(.horizontal, DesignSystem.Spacing.spacing8)
+                        .padding(.vertical, DesignSystem.Spacing.spacing4)
+                        .background(DesignSystem.Colors.surfaceElevated)
+                        .clipShape(Capsule())
                 }
 
-                // Available specs
-                if !viewModel.availableSpecs.isEmpty {
-                    sectionHeader("Available")
-
-                    ForEach(viewModel.availableSpecs, id: \.id) { spec in
-                        SpecRowView(spec: spec)
-                            .onTapGesture {
-                                viewModel.selectedSpec = spec
-                            }
-                    }
+                HStack(spacing: DesignSystem.Spacing.spacing8) {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundStyle(DesignSystem.Colors.textTertiary)
+                    TextField("Filter changes", text: $searchText)
+                        .textFieldStyle(.plain)
+                        .font(DesignSystem.Typography.bodyRegular)
                 }
-
-                // Unavailable specs
-                if !viewModel.unavailableSpecs.isEmpty {
-                    sectionHeader("Unavailable")
-
-                    ForEach(viewModel.unavailableSpecs, id: \.id) { spec in
-                        SpecRowView(spec: spec)
-                            .opacity(0.6)
-                    }
+                .padding(.horizontal, DesignSystem.Spacing.spacing10)
+                .padding(.vertical, DesignSystem.Spacing.spacing8)
+                .background(DesignSystem.Colors.surfaceElevated)
+                .clipShape(RoundedRectangle(cornerRadius: DesignSystem.Radius.small))
+                .overlay {
+                    RoundedRectangle(cornerRadius: DesignSystem.Radius.small)
+                        .stroke(DesignSystem.Colors.border, lineWidth: 1)
                 }
             }
-            .padding(DesignSystem.Spacing.spacing24)
+            .padding(DesignSystem.Spacing.spacing16)
+            .background(DesignSystem.Colors.surface)
+
+            Divider()
+
+            ScrollView {
+                LazyVStack(spacing: DesignSystem.Spacing.spacing8) {
+                    if let error = viewModel.errorMessage {
+                        errorBanner(message: error)
+                    }
+
+                    if let scanSummary = viewModel.scanSummary {
+                        infoBanner(message: scanSummary)
+                    }
+
+                    if !filteredAvailableSpecs.isEmpty {
+                        sectionHeader("Available")
+
+                        ForEach(filteredAvailableSpecs, id: \.id) { spec in
+                            SpecRowView(
+                                spec: spec,
+                                taskProgress: viewModel.taskProgress(for: spec),
+                                isSelected: viewModel.selectedSpec?.id == spec.id
+                            )
+                            .onTapGesture {
+                                viewModel.selectedSpec = spec
+                                isFocusMode = false
+                            }
+                        }
+                    }
+
+                    if !filteredUnavailableSpecs.isEmpty {
+                        sectionHeader("Unavailable")
+
+                        ForEach(filteredUnavailableSpecs, id: \.id) { spec in
+                            SpecRowView(
+                                spec: spec,
+                                taskProgress: viewModel.taskProgress(for: spec),
+                                isSelected: viewModel.selectedSpec?.id == spec.id
+                            )
+                            .opacity(0.6)
+                        }
+                    }
+
+                    if filteredAvailableSpecs.isEmpty && filteredUnavailableSpecs.isEmpty {
+                        Text("No matching changes")
+                            .font(DesignSystem.Typography.bodyRegular)
+                            .foregroundStyle(DesignSystem.Colors.textSecondary)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, DesignSystem.Spacing.spacing24)
+                    }
+                }
+                .padding(DesignSystem.Spacing.spacing12)
+            }
+        }
+        .background(DesignSystem.Colors.surface)
+    }
+
+    @ViewBuilder
+    private var detailPanel: some View {
+        if let selectedSpec = viewModel.selectedSpec {
+            SpecDetailView(
+                spec: selectedSpec,
+                viewModel: viewModel,
+                isFocusMode: isFocusMode,
+                onToggleFocus: {
+                    withAnimation(.easeInOut(duration: 0.18)) {
+                        isFocusMode.toggle()
+                    }
+                }
+            )
+            .id(selectedSpec.id)
+        } else {
+            noSelectionReaderView
+        }
+    }
+
+    private var noSelectionReaderView: some View {
+        VStack(spacing: DesignSystem.Spacing.spacing12) {
+            Image(systemName: "doc.text.magnifyingglass")
+                .font(.system(size: 32, weight: .light))
+                .foregroundStyle(DesignSystem.Colors.textTertiary)
+
+            Text("Select a change to review")
+                .font(DesignSystem.Typography.headingSmall)
+                .foregroundStyle(DesignSystem.Colors.textPrimary)
+
+            Text("Proposal, design, tasks, and capability specs appear here.")
+                .font(DesignSystem.Typography.bodyRegular)
+                .foregroundStyle(DesignSystem.Colors.textSecondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(DesignSystem.Colors.background)
+    }
+
+    private var filteredAvailableSpecs: [OpenSpecEntry] {
+        filtered(viewModel.availableSpecs)
+    }
+
+    private var filteredUnavailableSpecs: [OpenSpecEntry] {
+        filtered(viewModel.unavailableSpecs)
+    }
+
+    private func filtered(_ specs: [OpenSpecEntry]) -> [OpenSpecEntry] {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else {
+            return specs
+        }
+
+        return specs.filter {
+            $0.specName.localizedCaseInsensitiveContains(query)
+                || $0.branchName.localizedCaseInsensitiveContains(query)
         }
     }
 
@@ -158,6 +337,18 @@ struct SpecListView: View {
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: 320)
 
+            VStack(spacing: DesignSystem.Spacing.spacing6) {
+                Text(viewModel.branchSummary)
+                    .font(DesignSystem.Typography.caption)
+                    .foregroundStyle(DesignSystem.Colors.textSecondary)
+
+                Text(viewModel.localCheckoutSummary)
+                    .font(DesignSystem.Typography.caption)
+                    .foregroundStyle(DesignSystem.Colors.textTertiary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+
             Button {
                 Task {
                     await viewModel.scanForSpecs()
@@ -165,7 +356,7 @@ struct SpecListView: View {
             } label: {
                 HStack(spacing: DesignSystem.Spacing.spacing4) {
                     Image(systemName: "arrow.clockwise")
-                    Text("Scan Branches")
+                    Text("Scan Branch")
                 }
                 .font(DesignSystem.Typography.bodyMedium)
                 .padding(.horizontal, DesignSystem.Spacing.spacing16)
@@ -197,7 +388,7 @@ struct SpecListView: View {
                     .textFieldStyle(.roundedBorder)
                     .font(DesignSystem.Typography.monospace)
 
-                Text("Path relative to repository root where spec directories are located.")
+                Text("Remote path relative to the repository root. Do not include the repository name from the GitLab breadcrumb.")
                     .font(DesignSystem.Typography.caption)
                     .foregroundStyle(DesignSystem.Colors.textTertiary)
             }
@@ -260,6 +451,43 @@ struct SpecListView: View {
         .background(DesignSystem.Colors.dangerSoft)
         .clipShape(RoundedRectangle(cornerRadius: DesignSystem.Radius.small))
     }
+
+    private func infoBanner(message: String) -> some View {
+        HStack(spacing: DesignSystem.Spacing.spacing8) {
+            Image(systemName: "info.circle.fill")
+                .foregroundStyle(DesignSystem.Colors.accent)
+
+            Text(message)
+                .font(DesignSystem.Typography.bodyRegular)
+                .foregroundStyle(DesignSystem.Colors.textPrimary)
+
+            Spacer()
+        }
+        .padding(DesignSystem.Spacing.spacing12)
+        .background(DesignSystem.Colors.accentSoft)
+        .clipShape(RoundedRectangle(cornerRadius: DesignSystem.Radius.small))
+    }
+
+    private func specContextPill(icon: String, text: String) -> some View {
+        HStack(spacing: DesignSystem.Spacing.spacing4) {
+            Image(systemName: icon)
+                .font(.system(size: 11, weight: .medium))
+
+            Text(text)
+                .lineLimit(1)
+                .truncationMode(.middle)
+        }
+        .font(DesignSystem.Typography.caption)
+        .foregroundStyle(DesignSystem.Colors.textSecondary)
+        .padding(.horizontal, DesignSystem.Spacing.spacing8)
+        .padding(.vertical, DesignSystem.Spacing.spacing4)
+        .background(DesignSystem.Colors.surfaceElevated)
+        .clipShape(RoundedRectangle(cornerRadius: DesignSystem.Radius.small))
+        .overlay {
+            RoundedRectangle(cornerRadius: DesignSystem.Radius.small)
+                .stroke(DesignSystem.Colors.border, lineWidth: 1)
+        }
+    }
 }
 
 // MARK: - Spec Row View
@@ -268,6 +496,8 @@ struct SpecListView: View {
 struct SpecRowView: View {
 
     let spec: OpenSpecEntry
+    let taskProgress: OpenSpecTaskProgress?
+    var isSelected: Bool = false
 
     var body: some View {
         HStack(spacing: DesignSystem.Spacing.spacing12) {
@@ -285,11 +515,29 @@ struct SpecRowView: View {
                         .foregroundStyle(DesignSystem.Colors.textPrimary)
                         .lineLimit(1)
 
-                    if spec.hasUnreadVersion {
-                        Circle()
-                            .fill(DesignSystem.Colors.accent)
-                            .frame(width: 8, height: 8)
+                    if let taskProgress {
+                        Text(taskProgress.displayText)
+                            .font(.system(size: 11, weight: .bold, design: .rounded))
+                            .foregroundStyle(progressColor(for: taskProgress))
+                            .padding(.horizontal, DesignSystem.Spacing.spacing6)
+                            .padding(.vertical, DesignSystem.Spacing.spacing2)
+                            .background(progressColor(for: taskProgress).opacity(0.14))
+                            .clipShape(Capsule())
                     }
+
+                    if spec.hasUnreadVersion {
+                        Text("New")
+                            .font(DesignSystem.Typography.captionMedium)
+                            .foregroundStyle(DesignSystem.Colors.accent)
+                            .padding(.horizontal, DesignSystem.Spacing.spacing6)
+                            .padding(.vertical, DesignSystem.Spacing.spacing2)
+                            .background(DesignSystem.Colors.accentSoft)
+                            .clipShape(Capsule())
+                    }
+                }
+
+                if let taskProgress {
+                    progressBar(taskProgress)
                 }
 
                 HStack(spacing: DesignSystem.Spacing.spacing8) {
@@ -327,17 +575,21 @@ struct SpecRowView: View {
                 .foregroundStyle(DesignSystem.Colors.warning)
             }
 
-            Image(systemName: "chevron.right")
+            Image(systemName: isSelected ? "checkmark.circle.fill" : "chevron.right")
                 .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(DesignSystem.Colors.textTertiary)
+                .foregroundStyle(isSelected ? DesignSystem.Colors.accent : DesignSystem.Colors.textTertiary)
         }
         .padding(DesignSystem.Spacing.spacing12)
-        .background(DesignSystem.Colors.surface)
+        .background(isSelected ? DesignSystem.Colors.sidebarSelected : DesignSystem.Colors.surface)
         .clipShape(RoundedRectangle(cornerRadius: DesignSystem.Radius.medium))
         .overlay(
             RoundedRectangle(cornerRadius: DesignSystem.Radius.medium)
-                .stroke(DesignSystem.Colors.border, lineWidth: 1)
+                .stroke(
+                    isSelected ? DesignSystem.Colors.accent.opacity(0.4) : DesignSystem.Colors.border,
+                    lineWidth: 1
+                )
         )
+        .contentShape(Rectangle())
     }
 
     // MARK: - Phase Styling
@@ -346,6 +598,34 @@ struct SpecRowView: View {
         Image(systemName: SpecViewModel.phaseIcon(for: spec.phase))
             .font(.system(size: 14, weight: .medium))
             .foregroundStyle(phaseTextColor)
+    }
+
+    private func progressBar(_ progress: OpenSpecTaskProgress) -> some View {
+        GeometryReader { geometry in
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(DesignSystem.Colors.border.opacity(0.65))
+
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(progressColor(for: progress))
+                    .frame(width: geometry.size.width * progress.ratio)
+            }
+        }
+        .frame(height: 4)
+        .padding(.top, DesignSystem.Spacing.spacing2)
+        .accessibilityLabel("Task progress \(progress.completed) of \(progress.total)")
+    }
+
+    private func progressColor(for progress: OpenSpecTaskProgress) -> Color {
+        if progress.percentage >= 100 {
+            return DesignSystem.Colors.success
+        }
+
+        if progress.percentage >= 50 {
+            return DesignSystem.Colors.accent
+        }
+
+        return DesignSystem.Colors.warning
     }
 
     private var phaseTextColor: Color {
@@ -364,14 +644,20 @@ struct SpecRowView: View {
         case .proposal:
             return DesignSystem.Colors.accentSoft
         case .design:
-            return Color(red: 1.0, green: 0.96, blue: 0.89)
+            return DesignSystem.Colors.warningSoft
         case .tasks:
-            return Color(red: 0.89, green: 0.98, blue: 0.93)
+            return DesignSystem.Colors.successSoft
         }
     }
 }
 
 #Preview {
-    SpecListView(workspace: Workspace(name: "Preview Workspace"))
+    SpecListView(
+        workspace: Workspace(name: "Preview Workspace"),
+        gitLabAPIClient: GitLabAPIClient(
+            baseURL: URL(string: AppConstants.defaultGitLabInstanceURL)!,
+            tokenProvider: { "" }
+        )
+    )
         .modelContainer(for: Workspace.self, inMemory: true)
 }

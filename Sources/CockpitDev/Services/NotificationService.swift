@@ -22,11 +22,7 @@ protocol NotificationCenterProtocol: Sendable {
 }
 
 /// Conformance for the real UNUserNotificationCenter.
-extension UNUserNotificationCenter: NotificationCenterProtocol {
-    func notificationSettings() async -> UNNotificationSettings {
-        await self.notificationSettings()
-    }
-}
+extension UNUserNotificationCenter: NotificationCenterProtocol {}
 
 // MARK: - Notification Service
 

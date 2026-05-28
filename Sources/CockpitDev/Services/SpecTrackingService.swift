@@ -50,6 +50,7 @@ struct SpecFileInfo {
 /// - Handles branch deletion (marks specs unavailable)
 /// - Detects changes within 120 seconds of push events
 @Observable
+@MainActor
 class SpecTrackingService {
 
     // MARK: - Properties
@@ -187,7 +188,7 @@ class SpecTrackingService {
     /// Fetches the spec directory tree from GitLab and identifies spec entries.
     ///
     /// Spec directories are expected to follow the structure:
-    /// `<specPath>/<specName>/` containing files like requirements.md, design.md, tasks.md
+    /// `<specPath>/<specName>/` containing proposal.md, design.md, tasks.md, and specs/.
     ///
     /// - Parameters:
     ///   - projectId: The GitLab project ID.
@@ -266,6 +267,10 @@ class SpecTrackingService {
     ///   - workspace: The workspace to associate the entry with.
     ///   - projectId: The GitLab project ID for fetching content.
     private func processDiscoveredSpec(specFile: SpecFileInfo, workspace: Workspace, projectId: Int) async throws {
+        guard let snapshot = await fetchDocumentSnapshot(for: specFile, projectId: projectId) else {
+            return
+        }
+
         // Check if an entry already exists for this spec on this branch
         let existingEntry = findExistingEntry(
             specName: specFile.specName,
@@ -282,7 +287,8 @@ class SpecTrackingService {
             try await checkForContentChanges(
                 entry: entry,
                 specFile: specFile,
-                projectId: projectId
+                projectId: projectId,
+                snapshot: snapshot
             )
         } else {
             // Create new entry
@@ -300,7 +306,8 @@ class SpecTrackingService {
             try await createInitialVersion(
                 entry: entry,
                 specFile: specFile,
-                projectId: projectId
+                projectId: projectId,
+                snapshot: snapshot
             )
         }
     }
@@ -317,18 +324,14 @@ class SpecTrackingService {
     /// Extracts git commit metadata (author name, timestamp) from the last commit
     /// that modified the spec file. Falls back to "Unknown" author and current detection
     /// time if metadata is unavailable.
-    private func checkForContentChanges(entry: OpenSpecEntry, specFile: SpecFileInfo, projectId: Int) async throws {
-        // Fetch the primary spec file content (based on phase)
-        let primaryFile = primaryFileName(for: specFile.phase)
-        let filePath = "\(specFile.filePath)/\(primaryFile)"
-
+    private func checkForContentChanges(
+        entry: OpenSpecEntry,
+        specFile: SpecFileInfo,
+        projectId: Int,
+        snapshot: OpenSpecDocumentSnapshot
+    ) async throws {
         do {
-            let content = try await apiClient.fetchFileContent(
-                projectId: projectId,
-                filePath: filePath,
-                ref: specFile.branchName
-            )
-
+            let content = try snapshot.encodedContent()
             let contentHash = computeContentHash(content)
 
             // Check if content has changed from the latest version
@@ -340,7 +343,7 @@ class SpecTrackingService {
                 // Extract git commit metadata for the file
                 let (authorName, commitTimestamp) = await extractCommitMetadata(
                     projectId: projectId,
-                    filePath: filePath,
+                    filePath: "\(specFile.filePath)/\(primaryFileName(for: specFile.phase))",
                     ref: specFile.branchName
                 )
 
@@ -366,23 +369,20 @@ class SpecTrackingService {
     ///
     /// Extracts git commit metadata when available, falling back to "Unknown" author
     /// and current time if metadata cannot be retrieved.
-    private func createInitialVersion(entry: OpenSpecEntry, specFile: SpecFileInfo, projectId: Int) async throws {
-        let primaryFile = primaryFileName(for: specFile.phase)
-        let filePath = "\(specFile.filePath)/\(primaryFile)"
-
+    private func createInitialVersion(
+        entry: OpenSpecEntry,
+        specFile: SpecFileInfo,
+        projectId: Int,
+        snapshot: OpenSpecDocumentSnapshot
+    ) async throws {
         do {
-            let content = try await apiClient.fetchFileContent(
-                projectId: projectId,
-                filePath: filePath,
-                ref: specFile.branchName
-            )
-
+            let content = try snapshot.encodedContent()
             let contentHash = computeContentHash(content)
 
             // Extract git commit metadata for the file
             let (authorName, commitTimestamp) = await extractCommitMetadata(
                 projectId: projectId,
-                filePath: filePath,
+                filePath: "\(specFile.filePath)/\(primaryFileName(for: specFile.phase))",
                 ref: specFile.branchName
             )
 
@@ -399,6 +399,101 @@ class SpecTrackingService {
         } catch {
             // File might not exist - entry still created without initial version
         }
+    }
+
+    private func fetchDocumentSnapshot(
+        for specFile: SpecFileInfo,
+        projectId: Int
+    ) async -> OpenSpecDocumentSnapshot? {
+        guard let rootItems = try? await fetchRepositoryTree(
+            projectId: projectId,
+            path: specFile.filePath,
+            ref: specFile.branchName
+        ) else {
+            return nil
+        }
+
+        let rootFiles = Set(rootItems.filter { $0.type == "blob" }.map(\.name))
+        let proposal = await fetchOptionalContent(
+            named: "proposal.md",
+            ifPresentIn: rootFiles,
+            directoryPath: specFile.filePath,
+            projectId: projectId,
+            ref: specFile.branchName
+        )
+        let design = await fetchOptionalContent(
+            named: "design.md",
+            ifPresentIn: rootFiles,
+            directoryPath: specFile.filePath,
+            projectId: projectId,
+            ref: specFile.branchName
+        )
+        let tasks = await fetchOptionalContent(
+            named: "tasks.md",
+            ifPresentIn: rootFiles,
+            directoryPath: specFile.filePath,
+            projectId: projectId,
+            ref: specFile.branchName
+        )
+
+        let specsPath = "\(specFile.filePath)/specs"
+        var specDocuments: [OpenSpecDocumentSnapshot.SpecDocument] = []
+        if rootItems.contains(where: { $0.type == "tree" && $0.name == "specs" }),
+           let specItems = try? await fetchRepositoryTree(
+               projectId: projectId,
+               path: specsPath,
+               ref: specFile.branchName
+           ) {
+            for item in specItems {
+                if item.type == "blob", item.name.hasSuffix(".md"),
+                   let content = try? await apiClient.fetchFileContent(
+                       projectId: projectId,
+                       filePath: item.path,
+                       ref: specFile.branchName
+                   ) {
+                    specDocuments.append(.init(path: String(item.path.dropFirst(specFile.filePath.count + 1)), content: content))
+                } else if item.type == "tree",
+                          let nestedItems = try? await fetchRepositoryTree(
+                              projectId: projectId,
+                              path: item.path,
+                              ref: specFile.branchName
+                          ),
+                          let specItem = nestedItems.first(where: { $0.type == "blob" && $0.name == "spec.md" }),
+                          let content = try? await apiClient.fetchFileContent(
+                              projectId: projectId,
+                              filePath: specItem.path,
+                              ref: specFile.branchName
+                          ) {
+                    specDocuments.append(.init(path: String(specItem.path.dropFirst(specFile.filePath.count + 1)), content: content))
+                }
+            }
+        }
+
+        let snapshot = OpenSpecDocumentSnapshot(
+            proposal: proposal,
+            design: design,
+            tasks: tasks,
+            specs: specDocuments.sorted { $0.path < $1.path }
+        )
+        return snapshot.hasContent ? snapshot : nil
+    }
+
+    private func fetchOptionalContent(
+        named fileName: String,
+        ifPresentIn fileNames: Set<String>,
+        directoryPath: String,
+        projectId: Int,
+        ref: String
+    ) async -> String? {
+        guard fileNames.contains(fileName) else {
+            return nil
+        }
+
+        return try? await apiClient.fetchFileContent(
+            projectId: projectId,
+            filePath: "\(directoryPath)/\(fileName)",
+            ref: ref
+        )
     }
 
     // MARK: - Branch Deletion Handling
@@ -422,7 +517,7 @@ class SpecTrackingService {
     func primaryFileName(for phase: SpecPhase) -> String {
         switch phase {
         case .proposal:
-            return "requirements.md"
+            return "proposal.md"
         case .design:
             return "design.md"
         case .tasks:

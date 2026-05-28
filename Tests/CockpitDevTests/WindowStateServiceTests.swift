@@ -2,7 +2,7 @@ import XCTest
 @testable import CockpitDev
 
 /// Unit tests for WindowStateService persistence and restoration.
-final class WindowStateServiceTests: XCTestCase {
+final class WindowStateServiceTests: CockpitDevTestCase {
 
     private var defaults: UserDefaults!
     private var service: WindowStateService!

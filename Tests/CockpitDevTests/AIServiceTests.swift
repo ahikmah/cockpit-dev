@@ -1,14 +1,17 @@
 import XCTest
 @testable import CockpitDev
 
-final class AIServiceTests: XCTestCase {
+final class AIServiceTests: CockpitDevTestCase {
 
     private var service: AIService!
     private var encryptionService: EncryptionService!
 
     override func setUp() {
         super.setUp()
-        encryptionService = EncryptionService(serviceIdentifier: "com.cockpitdev.tests.ai.\(UUID().uuidString)")
+        encryptionService = EncryptionService(
+            serviceIdentifier: "com.cockpitdev.tests.ai.\(UUID().uuidString)",
+            keychainStorage: InMemoryKeychainStorage()
+        )
         service = AIService(
             endpoint: URL(string: "https://api.example.com/v1")!,
             timeout: 30,
